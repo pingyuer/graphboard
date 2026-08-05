@@ -297,10 +297,10 @@ def test_mcp_tool_surface(env):
     tools = asyncio.run(server.list_tools())
     names = sorted(t.name for t in tools)
     assert names == sorted([
-        "gb_pull", "gb_submit", "gb_split", "gb_propose", "gb_status",
-        "gb_query", "gb_note", "gb_doctor",
-        "gba_approve", "gba_announce", "gba_bootstrap", "gba_role",
-        "gba_grammar", "gba_export", "gba_release"])
+        "gb_pull", "gb_submit", "gb_split", "gb_delegate", "gb_reactivate",
+        "gb_propose", "gb_status", "gb_query", "gb_note", "gb_doctor",
+        "gba_approve", "gba_release", "gba_cancel", "gba_hold", "gba_announce",
+        "gba_bootstrap", "gba_role", "gba_grammar", "gba_export"])
 
 
 def test_mcp_errors_are_textual(env):

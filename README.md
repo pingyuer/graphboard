@@ -67,7 +67,7 @@ agent 们也获得了同样干净的分离。
 
 ```bash
 # 从 GitHub 安装（推荐，钉版本）
-pip install git+ssh://git@github.com/pingyuer/graphboard.git@v0.1.1
+pip install git+ssh://git@github.com/pingyuer/graphboard.git@v0.1.3
 
 # 跟 main 分支
 pip install git+ssh://git@github.com/pingyuer/graphboard.git
@@ -114,12 +114,23 @@ gb：根节点已播下。新开一个会话切到提案角色，说「pull 你�
 
 ## 核心概念
 
-- **节点**：一件工作。`proposed → pending → active → done | blocked`（另有 rejected）。
+- **节点**：一件工作。八态状态机：
+  `proposed → pending → active → running → done`，加 `blocked / rejected / canceled`。
+  - `active` = agent 正拿在手里（占**注意力**，一个脑子同时只有一份）
+  - `running` = 工作自主执行中、agent 已脱身（占**外部资源**，可以有多个）
 - **创建自由，生效受控**：`gb_propose` 恒为 proposed；`gb_submit` 声明的后继由文法
   裁决——`auto` 规则直接 pending，其余等人批。`default: approve` 兜底。
+  submit 若漏声明了文法里的 auto 后继，返回里会带 notice 提醒。
+- **委托执行（发起→脱身→收割）**：长训练/编译/管道/外部等待这类自主运行的活——
+  worker 发起后 `gb_delegate`（声明占用的资源标签 + 怎么检查 + 何时回查）立刻
+  脱身干下一个活，**不等**；`check_after` 到期回来用 `gb_submit` 收割，出事了
+  `gb_reactivate` 接管。接耗资源的活之前先 `gb_query state=running` 看占用，不抢。
+  这是「别抢显存」的泛化：别抢任何共享资源。
 - **split 细原子**：节点干到一半太大，`gb_split` 拆成子节点（父节点 blocked 释放
   owner，其他脑子可认领碎片）；子节点全部 done 时父节点自动回到 pending 待收拢。
   任务怎么切，上下文就怎么切。
+- **治理动作**：`hold`（推迟排队节点）、`release`（复活 blocked）、
+  `cancel`（作废被取代/放弃的节点，终态、留审计）、approve/reject。
 - **文法**：`transitions.yaml`，结构化编辑（写前 `gb grammar check` 校验，非法拒绝落盘）。
   引用未声明的节点类型会**自动声明**（占位 contract，doctor 会提醒你补全）；
   闭环无根默认拒绝（错误信息附两条出路），`force` 可显式接受。
@@ -128,17 +139,19 @@ gb：根节点已播下。新开一个会话切到提案角色，说「pull 你�
   边只记谱系，不决定你该读什么——fan-in 靠查询，不靠布线。
 - **上下文洁净**：会话常驻 = 身份 + 当前节点 + anchor。gb 会话的讨论不过界，
   过界的只有蒸馏物（角色文件/契约/文法数据）。工作角色看不见 gba_* 工具。
-- **干预三层**：改文法→未来生效判定；announce→下次 pull 注入；粘贴进会话→即刻。
+- **干预三层**：改文法→未来生效判定；announce（可带 TTL）→下次 pull 注入；
+  粘贴进会话→即刻。
 
 ## 工具命名空间与权力结构
 
 | 命名空间 | 工具 | 谁可用 |
 |---|---|---|
-| `gb_*` 工作 | pull / submit / split / propose / note / status / query / doctor | 全体角色 |
-| `gba_*` 治理 | approve / reject / release / announce / role / grammar / bootstrap / export | 仅 gb |
+| `gb_*` 工作 | pull / submit / split / delegate / reactivate / propose / note / status / query / doctor | 全体角色 |
+| `gba_*` 治理 | approve / reject / release / cancel / hold / announce / role / grammar / bootstrap / export | 仅 gb |
 
 `gb init` 生成的 opencode.json 里 `gba_*` 全局禁用、gb 覆盖启用——之后生成的
-任何新角色自动无权，零维护保住权力边界。
+任何新角色自动无权，零维护保住权力边界。控制面文件（`.board/`、角色文件、
+opencode.json）对所有 agent 的文件编辑工具**硬 deny**，只能经 MCP 工具合法修改。
 
 ## 项目结构（gb init 产物，全部自包含）
 
@@ -161,12 +174,16 @@ gb init [dir] [--name N] [--template minimal|rd-classic|experiment|branching]
               [--agents gb,proposal,...] [--git] [--force]
 gb list / show <id> / export
 gb query --type T --state S --under <id> --owner O
-gb approve <id> | reject <id> | announce "..."
+gb approve <id> | reject <id> | hold <id> | release <id> | cancel <id>
+gb announce "..." [--ttl-days N] [--clear]
 gb split <id> --owner O --child TYPE|SPEC [--child ...]
+gb delegate <id> --owner O [--resources R] [--note N] [--check-after T]
+gb reactivate <id> --owner O
 gb role new NAME --repo R --desc D --claims T1,T2   # gb 对话之外的手动通道
 gb grammar check
 gb grammar add --from X --on E --to Y [--activate auto] [--budget N]
 gb grammar remove --from X --on E --to Y
+gb doctor [--orphan-hours 4] [--stale-hours 24]
 ```
 
 ## 模板（可选起点，不是模具）
@@ -178,9 +195,26 @@ gb grammar remove --from X --on E --to Y
 | branching | plan → implementation×N → review（查询聚合）→ harvest |
 | experiment | hypothesis → experiment → analysis → writeup |
 
+## 委托执行（长时任务不挂 agent）
+
+小时级自主运行的活（训练/编译/管道/外部等待）——agent 的职责是**发起 + 稍后收割**，
+不是持续执行。注意力（active）与外部资源（running）是两种并发维度：
+
+```
+worker pull 节点 → 起外部执行（如 tmux）→ gb_delegate(resources, note, check_after)
+  → 节点 running，worker 脱身去 pull 下一个活（一个脑子 = 1 active + N running）
+  → check_after 到期：worker 回来检查 → gb_submit 收割 done，
+    或 gb_reactivate 接管（外部执行崩了要修）
+```
+
+- `resources` 是轻量标签（如 `gpu:srv1;machine:srv2`），非分配器
+- 接耗资源的活前 `gb_query state=running` 看占用，不抢任何共享资源
+- doctor 浮现 check_after 已到期的 running 节点；告警同一 owner 多个 active
+  （长任务请 delegate，别攥在手里）
+
 ## 会话死亡与接管（release 协议）
 
-长时节点（训练跑几小时）期间 worker 会话可能死掉。状态图显式管理这件事：
+worker 会话可能死掉。状态图显式管理这件事：
 
 ```
 1. 发现：doctor 报「possibly orphaned」（active 节点超过 --orphan-hours 无更新）
@@ -192,6 +226,7 @@ gb grammar remove --from X --on E --to Y
 
 配套纪律：worker 有实质进展就 `gb_note` 一次——锚点即心跳，note 的新鲜度
 就是 doctor 判断失联的依据。不做自动超时释放：判定死亡是需要上下文的人类判断。
+被取代/放弃的节点用 `gba_cancel` 作废（终态、留审计），别用 note 假装标记。
 
 ## 多 agent 的 git 管理
 
@@ -258,8 +293,9 @@ graphboard/
 ## 测试
 
 ```bash
-python3 -m pytest tests/ -q   # 101 tests：竞态认领/裁决矩阵/文法检查（swap/闭环/
-                              # 自动声明）/query/split 生命周期/release 接管/
-                              # 角色生成与更新/治理工具/init 脚手架与 git 矩阵/
-                              # e2e 双情景/MCP 层
+python3 -m pytest tests/ -q   # 126 tests：竞态认领/批内定序/裁决矩阵/文法检查
+                              # （swap/闭环/自动声明）/query/split/委托执行
+                              # （delegate/收割/reactivate）/cancel/hold/TTL/
+                              # schema 迁移/release 接管/角色生成与更新/治理工具/
+                              # init 脚手架与 git 矩阵/e2e 双情景/MCP 层/泛用性守卫
 ```

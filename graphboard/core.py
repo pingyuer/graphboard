@@ -1,8 +1,9 @@
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import grammar as grammar_mod
+from .db import OPEN_STATES, STATES, TERMINAL_STATES
 
 
 class GbError(Exception):
@@ -78,9 +79,10 @@ def _fail(conn, tool, owner, node_id, msg):
 
 def _unread_announcements(conn, owner):
     rows = conn.execute(
-        "SELECT id, text FROM announcements WHERE active=1 AND id NOT IN "
+        "SELECT id, text FROM announcements WHERE active=1 "
+        "AND (expires_at IS NULL OR expires_at > ?) AND id NOT IN "
         "(SELECT ann_id FROM announcement_reads WHERE owner=?) ORDER BY id",
-        (owner,)).fetchall()
+        (now_iso(), owner)).fetchall()
     for r in rows:
         conn.execute(
             "INSERT OR IGNORE INTO announcement_reads(owner, ann_id) VALUES(?,?)",
@@ -94,7 +96,7 @@ def pull(conn, owner, type_filter=None, contracts=None):
     if type_filter:
         q += " AND type=?"
         args.append(type_filter)
-    q += " ORDER BY created_at ASC, id ASC LIMIT 5"
+    q += " ORDER BY created_at ASC, rowid ASC LIMIT 5"
     candidates = conn.execute(q, args).fetchall()
     ts = now_iso()
     for row in candidates:
@@ -132,7 +134,7 @@ def pull(conn, owner, type_filter=None, contracts=None):
             }
     counts = {s: conn.execute(
         "SELECT COUNT(*) c FROM nodes WHERE state=?", (s,)).fetchone()["c"]
-        for s in ("proposed", "pending", "active", "blocked")}
+        for s in ("proposed",) + OPEN_STATES}
     awaiting = None
     if counts["proposed"]:
         q = "SELECT COUNT(*) c FROM nodes WHERE state='proposed'"
@@ -179,7 +181,7 @@ def query(conn, type=None, state=None, under=None, owner=None, limit=20):
     q = "SELECT * FROM nodes"
     if clauses:
         q += " WHERE " + " AND ".join(clauses)
-    q += " ORDER BY created_at ASC, id ASC LIMIT ?"
+    q += " ORDER BY created_at ASC, rowid ASC LIMIT ?"
     args.append(max(1, int(limit)))
     nodes = []
     for row in conn.execute(q, args).fetchall():
@@ -188,7 +190,9 @@ def query(conn, type=None, state=None, under=None, owner=None, limit=20):
             (row["id"],)).fetchall()]
         nodes.append({"id": row["id"], "type": row["type"], "state": row["state"],
                       "owner": row["owner"], "spec": row["spec"],
-                      "parent": row["parent"], "outputs": outputs})
+                      "parent": row["parent"], "outputs": outputs,
+                      "resources": row["resources"],
+                      "check_after": row["check_after"]})
     return {"nodes": nodes, "truncated": len(nodes) >= int(limit)}
 
 
@@ -255,11 +259,26 @@ def _maybe_reactivate_parent(conn, node, ts):
     return None
 
 
+def _undeclared_auto_notices(grammar, node, ev, successors):
+    if grammar is None or not grammar.rules:
+        return []
+    declared = {s["type"] for s in successors}
+    notices = []
+    for r in grammar.rules:
+        if r.activate != "auto" or r.on != ev or r.to == "any":
+            continue
+        if r.frm not in (node["type"], "any") or r.to in declared:
+            continue
+        notices.append(f"grammar defines {node['type']} --{ev}--> {r.to} (auto) "
+                       f"but no such successor was declared")
+    return notices
+
+
 def submit(conn, node_id, owner, status, outputs=(), successors=(),
            event=None, note=None, grammar=None):
     node = _node_or_fail(conn, "submit", owner, node_id)
-    if node["state"] != "active":
-        msg = f"node {node_id} is {node['state']}, not active"
+    if node["state"] not in ("active", "running"):
+        msg = f"node {node_id} is {node['state']}, not active|running"
         if node["state"] == "done":
             msg += (f"; to attach successors after done, use propose with "
                     f"parent={node_id}")
@@ -282,7 +301,8 @@ def submit(conn, node_id, owner, status, outputs=(), successors=(),
             "INSERT INTO outputs(node_id, path, note, created_at) VALUES(?,?,?,?)",
             (node_id, o["path"], o.get("note"), ts))
     conn.execute(
-        "UPDATE nodes SET state=?, note=?, updated_at=? WHERE id=?",
+        "UPDATE nodes SET state=?, note=?, resources=NULL, check_after=NULL, "
+        "updated_at=? WHERE id=?",
         (status, note if note is not None else node["note"], ts, node_id))
 
     reactivated = _maybe_reactivate_parent(conn, node, ts)
@@ -301,13 +321,14 @@ def submit(conn, node_id, owner, status, outputs=(), successors=(),
             (node_id, ev, child_id))
         verdicts.append({"id": child_id, "type": stype, "state": state,
                          "reason": reason})
+    notices = _undeclared_auto_notices(grammar, node, ev, successors)
     _event(conn, "submit", owner, node_id,
            f"status={status} event={ev} outputs={len(outputs)} "
            f"successors={len(verdicts)}")
     conn.commit()
     return {"id": node_id, "state": status, "event": ev,
             "outputs": len(outputs), "successors": verdicts,
-            "reactivated": reactivated}
+            "reactivated": reactivated, "notices": notices}
 
 
 def split(conn, node_id, owner, children, grammar=None):
@@ -373,22 +394,80 @@ def status(conn, node_id=None):
             parent = dict(p) if p else None
         children = [dict(r) for r in conn.execute(
             "SELECT id, type, state, on_event FROM nodes WHERE parent=? "
-            "ORDER BY created_at", (node_id,)).fetchall()]
+            "ORDER BY created_at, rowid", (node_id,)).fetchall()]
         outputs = [dict(r) for r in conn.execute(
             "SELECT path, note, created_at FROM outputs WHERE node_id=? "
             "ORDER BY created_at", (node_id,)).fetchall()]
         return {"node": dict(node), "parent": parent,
                 "children": children, "outputs": outputs}
     counts = {}
-    for s in ("proposed", "pending", "active", "done", "blocked", "rejected"):
+    for s in STATES:
         counts[s] = conn.execute(
             "SELECT COUNT(*) c FROM nodes WHERE state=?", (s,)).fetchone()["c"]
     open_nodes = [dict(r) for r in conn.execute(
-        "SELECT id, type, state, owner, spec FROM nodes "
-        "WHERE state IN ('pending','active','proposed','blocked') "
-        "ORDER BY CASE state WHEN 'active' THEN 0 WHEN 'pending' THEN 1 "
-        "WHEN 'blocked' THEN 2 ELSE 3 END, created_at").fetchall()]
+        "SELECT id, type, state, owner, spec, resources, check_after FROM nodes "
+        "WHERE state IN ('pending','active','running','proposed','blocked') "
+        "ORDER BY CASE state WHEN 'active' THEN 0 WHEN 'running' THEN 1 "
+        "WHEN 'pending' THEN 2 WHEN 'blocked' THEN 3 ELSE 4 END, "
+        "created_at, rowid").fetchall()]
     return {"counts": counts, "open": open_nodes}
+
+
+def cancel(conn, node_id, reason=""):
+    node = _node_or_fail(conn, "cancel", "", node_id)
+    if node["state"] in TERMINAL_STATES:
+        _fail(conn, "cancel", "", node_id,
+              f"node {node_id} is already {node['state']}")
+    conn.execute(
+        "UPDATE nodes SET state='canceled', resources=NULL, check_after=NULL, "
+        "updated_at=? WHERE id=?",
+        (now_iso(), node_id))
+    _event(conn, "cancel", "", node_id, reason or "canceled")
+    conn.commit()
+
+
+def hold(conn, node_id, reason=""):
+    node = _node_or_fail(conn, "hold", "", node_id)
+    if node["state"] not in ("proposed", "pending"):
+        _fail(conn, "hold", "", node_id,
+              f"node {node_id} is {node['state']}, only proposed|pending can be held")
+    conn.execute("UPDATE nodes SET state='blocked', updated_at=? WHERE id=?",
+                 (now_iso(), node_id))
+    _event(conn, "hold", "", node_id, reason or "held (deferred)")
+    conn.commit()
+
+
+def delegate(conn, node_id, owner, resources="", note=None, check_after=None):
+    node = _node_or_fail(conn, "delegate", owner, node_id)
+    if node["state"] != "active":
+        _fail(conn, "delegate", owner, node_id,
+              f"node {node_id} is {node['state']}, only active nodes can be "
+              f"delegated to running")
+    if node["owner"] and node["owner"] != owner:
+        _fail(conn, "delegate", owner, node_id,
+              f"node {node_id} is owned by {node['owner']}, not {owner}")
+    conn.execute(
+        "UPDATE nodes SET state='running', resources=?, note=?, check_after=?, "
+        "updated_at=? WHERE id=?",
+        (resources or None, note if note is not None else node["note"],
+         check_after or None, now_iso(), node_id))
+    _event(conn, "delegate", owner, node_id,
+           f"resources={resources or '-'} check_after={check_after or '-'}")
+    conn.commit()
+    return {"id": node_id, "state": "running", "resources": resources or None}
+
+
+def reactivate(conn, node_id, owner):
+    node = _node_or_fail(conn, "reactivate", owner, node_id)
+    if node["state"] != "running":
+        _fail(conn, "reactivate", owner, node_id,
+              f"node {node_id} is {node['state']}, only running nodes can be "
+              f"reactivated")
+    conn.execute("UPDATE nodes SET state='active', owner=?, updated_at=? "
+                 "WHERE id=?", (owner, now_iso(), node_id))
+    _event(conn, "reactivate", owner, node_id, "attention reclaimed")
+    conn.commit()
+    return {"id": node_id, "state": "active", "owner": owner}
 
 
 def release(conn, node_id, reason=""):
@@ -434,14 +513,18 @@ def reject(conn, node_id):
     conn.commit()
 
 
-def announce(conn, text=None, clear=False, owner=""):
+def announce(conn, text=None, clear=False, owner="", ttl_days=None):
     if clear:
         conn.execute("UPDATE announcements SET active=0 WHERE active=1")
     ann_id = None
     if text:
+        expires_at = None
+        if ttl_days:
+            exp = datetime.now(timezone.utc) + timedelta(days=float(ttl_days))
+            expires_at = exp.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         cur = conn.execute(
-            "INSERT INTO announcements(text, active, created_at) VALUES(?,1,?)",
-            (text, now_iso()))
+            "INSERT INTO announcements(text, active, expires_at, created_at) "
+            "VALUES(?,1,?,?)", (text, expires_at, now_iso()))
         ann_id = cur.lastrowid
     _event(conn, "announce", owner, "",
            (text or "") + (" (cleared)" if clear else ""))

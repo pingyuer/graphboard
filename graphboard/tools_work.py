@@ -18,9 +18,10 @@ def register(server, infra):
             return render.render_pull(result)
         return guard("gb_pull", {"owner": owner, "type": type}, run)
 
-    @server.tool(description="Finish the active node. status: done|blocked; event overrides the grammar "
-                             "event (default: status). outputs: PATH[:NOTE];PATH. successors: "
-                             "TYPE|SPEC;TYPE|SPEC (grammar decides auto vs approval).")
+    @server.tool(description="Finish the active node, or harvest a running one. status: done|blocked; "
+                             "event overrides the grammar event (default: status). outputs: PATH[:NOTE];PATH. "
+                             "successors: TYPE|SPEC;TYPE|SPEC (grammar decides auto vs approval). "
+                             "Declare every successor the workflow expects.")
     def gb_submit(id: str, owner: str, status: str, event: str = "", note: str = "",
                   outputs: str = "", successors: str = "") -> str:
         def run(conn):
@@ -34,6 +35,30 @@ def register(server, infra):
         return guard("gb_submit", {"id": id, "owner": owner, "status": status,
                                    "event": event, "note": note,
                                    "outputs": outputs, "successors": successors}, run)
+
+    @server.tool(description="Delegate an active node to autonomous execution (long training/build/"
+                             "pipeline/external wait): you launched it in the background, now detach and "
+                             "move on - do NOT wait. resources: held resource labels (e.g. gpu:srv1;"
+                             "machine:srv2). note: how to check it later (tmux/log coords). check_after: "
+                             "when to come back and harvest (ISO time). Harvest later via gb_submit.")
+    def gb_delegate(id: str, owner: str, resources: str = "", note: str = "",
+                    check_after: str = "") -> str:
+        def run(conn):
+            result = core.delegate(conn, id, owner=owner, resources=resources,
+                                   note=note or None, check_after=check_after or None)
+            return render.render_delegate(result)
+        return guard("gb_delegate", {"id": id, "owner": owner,
+                                     "resources": resources, "note": note,
+                                     "check_after": check_after}, run)
+
+    @server.tool(description="Reclaim a running node's attention (running -> active): the autonomous "
+                             "work crashed and needs hands-on fixing, or you continue it manually. "
+                             "Caller becomes the owner.")
+    def gb_reactivate(id: str, owner: str) -> str:
+        def run(conn):
+            result = core.reactivate(conn, id, owner=owner)
+            return render.render_reactivate(result)
+        return guard("gb_reactivate", {"id": id, "owner": owner}, run)
 
     @server.tool(description="Split an active node into smaller children when the work grew too big. "
                              "children: TYPE|SPEC;TYPE|SPEC. The node becomes blocked and unowned; when "
@@ -64,7 +89,9 @@ def register(server, infra):
         return guard("gb_status", {"id": id}, run)
 
     @server.tool(description="Query nodes by any mix of type/state/under(subtree of a node id, inclusive)/"
-                             "owner. Compact list with output paths; read specific files natively afterwards.")
+                             "owner. Compact list with output paths and held resources (for running nodes); "
+                             "read specific files natively afterwards. Use state=running to see which "
+                             "resources are occupied before claiming resource-consuming work.")
     def gb_query(type: str = "", state: str = "", under: str = "", owner: str = "",
                  limit: int = 20) -> str:
         def run(conn):

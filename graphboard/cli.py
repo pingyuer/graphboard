@@ -140,6 +140,37 @@ def cmd_release(args):
     return 0
 
 
+def cmd_cancel(args):
+    conn, _, _ = open_board(args)
+    core.cancel(conn, args.id, reason=args.reason or "")
+    print(render.render_cancel(args.id))
+    return 0
+
+
+def cmd_hold(args):
+    conn, _, _ = open_board(args)
+    core.hold(conn, args.id, reason=args.reason or "")
+    print(render.render_hold(args.id))
+    return 0
+
+
+def cmd_delegate(args):
+    conn, _, _ = open_board(args)
+    result = core.delegate(conn, args.id, owner=args.owner,
+                           resources=args.resources or "",
+                           note=args.note or None,
+                           check_after=args.check_after or None)
+    print(render.render_delegate(result))
+    return 0
+
+
+def cmd_reactivate(args):
+    conn, _, _ = open_board(args)
+    result = core.reactivate(conn, args.id, owner=args.owner)
+    print(render.render_reactivate(result))
+    return 0
+
+
 def cmd_note(args):
     conn, _, _ = open_board(args)
     core.note(conn, args.id, args.text)
@@ -163,7 +194,8 @@ def cmd_reject(args):
 
 def cmd_announce(args):
     conn, _, _ = open_board(args)
-    ann_id = core.announce(conn, text=args.text, clear=args.clear)
+    ann_id = core.announce(conn, text=args.text, clear=args.clear,
+                           ttl_days=args.ttl_days or None)
     print(render.render_announce(ann_id, args.clear))
     return 0
 
@@ -367,6 +399,34 @@ def build_parser():
     p.add_argument("--reason")
     p.set_defaults(fn=cmd_release)
 
+    p = sub.add_parser("cancel", help="cancel a non-terminal node (superseded/"
+                                      "abandoned); terminal, audit preserved")
+    p.add_argument("id")
+    p.add_argument("--reason")
+    p.set_defaults(fn=cmd_cancel)
+
+    p = sub.add_parser("hold", help="defer a proposed|pending node (-> blocked, "
+                                    "invisible to pull until released)")
+    p.add_argument("id")
+    p.add_argument("--reason")
+    p.set_defaults(fn=cmd_hold)
+
+    p = sub.add_parser("delegate", help="delegate an active node to autonomous "
+                                        "execution (-> running, agent detached)")
+    p.add_argument("id")
+    p.add_argument("--owner", required=True)
+    p.add_argument("--resources", help="held resource labels, e.g. gpu:srv1;machine:srv2")
+    p.add_argument("--note", help="how to check it later (tmux/log coords)")
+    p.add_argument("--check-after", dest="check_after",
+                   help="when to come back and harvest (ISO time)")
+    p.set_defaults(fn=cmd_delegate)
+
+    p = sub.add_parser("reactivate", help="reclaim a running node's attention "
+                                          "(-> active, caller becomes owner)")
+    p.add_argument("id")
+    p.add_argument("--owner", required=True)
+    p.set_defaults(fn=cmd_reactivate)
+
     p = sub.add_parser("note", help="replace a node's anchor note")
     p.add_argument("id")
     p.add_argument("--text", required=True)
@@ -384,6 +444,8 @@ def build_parser():
     p = sub.add_parser("announce", help="broadcast to all agents")
     p.add_argument("text", nargs="?")
     p.add_argument("--clear", action="store_true")
+    p.add_argument("--ttl-days", dest="ttl_days", type=float, default=0,
+                   help="auto-expire after N days (default: never)")
     p.set_defaults(fn=cmd_announce)
 
     p = sub.add_parser("grammar", help="grammar inspection and structured editing")

@@ -61,6 +61,8 @@ def render_submit(result):
     for s in result.get("successors", ()):
         lines.append(
             f"successor: {s['id']} ({s['type']}) -> {s['state']} [{s['reason']}]")
+    for n in result.get("notices", ()):
+        lines.append(f"notice: {n}")
     return "\n".join(lines)
 
 
@@ -90,6 +92,10 @@ def render_status(result):
         ]
         if n.get("note"):
             lines.append(f"note: {n['note']}")
+        if n.get("resources"):
+            lines.append(f"resources: {n['resources']}")
+        if n.get("check_after"):
+            lines.append(f"check_after: {n['check_after']}")
         if result.get("parent"):
             p = result["parent"]
             lines.append(f"parent: {p['id']} ({p['type']}, {p['state']})")
@@ -109,7 +115,8 @@ def render_status(result):
         lines.append("open nodes:")
         for n in result["open"][:OVERVIEW_BUDGET - 2]:
             owner = f" [{n['owner']}]" if n.get("owner") else ""
-            lines.append(f"  - {n['id']} ({n['type']}, {n['state']}){owner} "
+            res = f" res={n['resources']}" if n.get("resources") else ""
+            lines.append(f"  - {n['id']} ({n['type']}, {n['state']}){owner}{res} "
                          f"{_first_line(n['spec'], 60)}")
         extra = len(result["open"]) - (OVERVIEW_BUDGET - 2)
         if extra > 0:
@@ -125,12 +132,34 @@ def render_query(result):
         owner = f" [{n['owner']}]" if n.get("owner") else ""
         lines.append(f"{n['id']} ({n['type']}, {n['state']}){owner} "
                      f"{_first_line(n['spec'], 60)}")
+        if n.get("resources"):
+            check = f" check_after={n['check_after']}" if n.get("check_after") else ""
+            lines.append(f"  resources: {n['resources']}{check}")
         if n["outputs"]:
             outs = ", ".join(o["path"] for o in n["outputs"])
             lines.append(f"  outputs: {outs}")
     if result.get("truncated"):
         lines.append("... (limit reached, narrow the query)")
     return "\n".join(lines)
+
+
+def render_cancel(node_id):
+    return f"canceled: {node_id} (terminal; owner/note preserved for audit)"
+
+
+def render_hold(node_id):
+    return f"held: {node_id} -> blocked (deferred; release to re-queue)"
+
+
+def render_delegate(result):
+    res = f" resources={result['resources']}" if result.get("resources") else ""
+    return (f"delegated: {result['id']} -> running{res} (agent detached; "
+            f"harvest later via submit, or gb_reactivate to reclaim)")
+
+
+def render_reactivate(result):
+    return (f"reactivated: {result['id']} -> active "
+            f"(attention reclaimed by {result['owner']})")
 
 
 def render_release(node_id):

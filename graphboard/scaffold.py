@@ -26,6 +26,12 @@ GIT_BASH_DENIALS = {
     "git commit --all*": "deny",
 }
 
+CONTROL_PLANE_EDIT_DENIALS = {
+    ".board/*": "deny",
+    ".opencode/agents/*": "deny",
+    "opencode.json": "deny",
+}
+
 
 def available_templates():
     return sorted(p.name[len("tmpl-"):-len(".yaml")]
@@ -113,6 +119,7 @@ def write_opencode_config(repo, board_dir, project):
                 "mcp": {"graphboard": mcp_block},
                 "tools": {"gba_*": False},
                 "agent": {"gb": {"tools": {"gba_*": True}}},
+                "permission": {"edit": CONTROL_PLANE_EDIT_DENIALS},
             }, indent=2)
             fallback = repo / ".opencode" / "graphboard-mcp.snippet.json"
             fallback.parent.mkdir(parents=True, exist_ok=True)
@@ -124,9 +131,16 @@ def write_opencode_config(repo, board_dir, project):
     config.setdefault("tools", {})["gba_*"] = False
     gb_cfg = config.setdefault("agent", {}).setdefault("gb", {})
     gb_cfg.setdefault("tools", {})["gba_*"] = True
-    bash_perm = config.setdefault("permission", {}).setdefault("bash", {})
+    perm = config.setdefault("permission", {})
+    bash_perm = perm.setdefault("bash", {})
     for pattern, action in GIT_BASH_DENIALS.items():
         bash_perm.setdefault(pattern, action)
+    edit_perm = perm.get("edit")
+    if not isinstance(edit_perm, dict):
+        edit_perm = {} if edit_perm is None else {"*": edit_perm}
+        perm["edit"] = edit_perm
+    for pattern, action in CONTROL_PLANE_EDIT_DENIALS.items():
+        edit_perm.setdefault(pattern, action)
     oc.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     return "wrote"
 

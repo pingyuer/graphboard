@@ -1,4 +1,5 @@
 from . import core, render, roles, scaffold
+from .db import STATES
 from .grammar import grammar_add_rule, grammar_remove_rule, load
 
 
@@ -25,13 +26,32 @@ def register(server, infra):
             return render.render_release(id)
         return guard("gba_release", {"id": id, "reason": reason}, run)
 
-    @server.tool(description="GOVERNANCE (gb conductor only). Broadcast an announcement on explicit human "
-                             "instruction; delivered to agents on their next gb_pull.")
-    def gba_announce(text: str) -> str:
+    @server.tool(description="GOVERNANCE (gb conductor only). Cancel a non-terminal node on explicit human "
+                             "instruction (superseded, abandoned, invalid). Terminal: owner/note preserved "
+                             "for audit; resources freed.")
+    def gba_cancel(id: str, reason: str = "") -> str:
         def run(conn):
-            ann_id = core.announce(conn, text=text)
+            core.cancel(conn, id, reason=reason)
+            return render.render_cancel(id)
+        return guard("gba_cancel", {"id": id, "reason": reason}, run)
+
+    @server.tool(description="GOVERNANCE (gb conductor only). Hold (defer) a proposed|pending node: it "
+                             "becomes blocked and invisible to gb_pull until released. Use for human-"
+                             "directed postponement.")
+    def gba_hold(id: str, reason: str = "") -> str:
+        def run(conn):
+            core.hold(conn, id, reason=reason)
+            return render.render_hold(id)
+        return guard("gba_hold", {"id": id, "reason": reason}, run)
+
+    @server.tool(description="GOVERNANCE (gb conductor only). Broadcast an announcement on explicit human "
+                             "instruction; delivered to agents on their next gb_pull. ttl_days: auto-expire "
+                             "after N days (default: never).")
+    def gba_announce(text: str, ttl_days: float = 0) -> str:
+        def run(conn):
+            ann_id = core.announce(conn, text=text, ttl_days=ttl_days or None)
             return render.render_announce(ann_id, cleared=False)
-        return guard("gba_announce", {"text": text}, run)
+        return guard("gba_announce", {"text": text, "ttl_days": ttl_days}, run)
 
     @server.tool(description="GOVERNANCE (gb conductor only). Create the board if missing. "
                              "template: minimal|rd-classic|experiment|branching.")
@@ -125,10 +145,10 @@ def register(server, infra):
             overview = core.status(conn)
             lines = ["counts: " + ", ".join(f"{k}: {v}"
                                              for k, v in overview["counts"].items())]
-            for state in ("active", "pending", "proposed", "blocked", "done", "rejected"):
+            for state in STATES:
                 rows = conn.execute(
                     "SELECT id, type, owner, spec FROM nodes WHERE state=? "
-                    "ORDER BY created_at", (state,)).fetchall()
+                    "ORDER BY created_at, rowid", (state,)).fetchall()
                 if not rows:
                     continue
                 lines.append(f"{state}:")

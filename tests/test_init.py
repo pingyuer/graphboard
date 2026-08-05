@@ -108,7 +108,11 @@ def test_init_existing_opencode_json_merged(tmp_path):
     (proj / "AGENTS.md").write_text("# my rules\n")
     assert cli.main(["init", str(proj)]) == 0
     config = json.loads((proj / "opencode.json").read_text())
-    assert config["permission"]["edit"] == "ask"
+    edit = config["permission"]["edit"]
+    assert edit["*"] == "ask"
+    assert edit[".board/*"] == "deny"
+    assert edit[".opencode/agents/*"] == "deny"
+    assert edit["opencode.json"] == "deny"
     assert config["permission"]["bash"]["git push*"] == "ask"
     assert config["permission"]["bash"]["npm *"] == "allow"
     assert config["permission"]["bash"]["git rebase*"] == "deny"

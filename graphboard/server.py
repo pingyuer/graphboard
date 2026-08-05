@@ -68,6 +68,20 @@ def _grammar_and_contracts():
     return out
 
 
+LOG_MAX_BYTES = 1024 * 1024
+
+
+def _rotate_log(log_path):
+    try:
+        if log_path.exists() and log_path.stat().st_size > LOG_MAX_BYTES:
+            backup = log_path.with_suffix(".log.1")
+            if backup.exists():
+                backup.unlink()
+            log_path.rename(backup)
+    except OSError:
+        pass
+
+
 def _log_call(tool, args, result, error):
     if os.environ.get("GB_DEBUG") == "0":
         return
@@ -88,8 +102,10 @@ def _log_call(tool, args, result, error):
         entry["args"] = {k: (str(v)[:80] if v else v) for k, v in args.items()}
         if error:
             entry["result"] = str(result)[:200]
+    log_path = board / "server.log"
     try:
-        with open(board / "server.log", "a", encoding="utf-8") as f:
+        _rotate_log(log_path)
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError:
         pass

@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+from .db import OPEN_STATES
 from .grammar import EVENT_WORDS, check, load_nodetypes
 
 OWNER_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
@@ -97,10 +98,43 @@ def run_checks(conn, board, grammar, stale_hours=24.0, orphan_hours=4.0):
         issues.append("blocked parent with rejected child (decide manually): "
                       + ", ".join(r["id"] for r in orphaned_parents))
 
+    due_running = conn.execute(
+        "SELECT id, owner, resources FROM nodes WHERE state='running' AND "
+        "check_after IS NOT NULL AND "
+        "check_after < strftime('%Y-%m-%dT%H:%M:%S','now')").fetchall()
+    if due_running:
+        issues.append("running node(s) due for check (check_after passed): "
+                      + ", ".join(f"{r['id']} [{r['owner'] or '-'}] "
+                                  f"({r['resources'] or 'no resources'})"
+                                  for r in due_running)
+                      + " - harvest or extend via reactivate/note")
+    else:
+        ok.append("no running nodes due for check")
+
+    multi = conn.execute(
+        "SELECT owner, COUNT(*) c FROM nodes WHERE state='active' "
+        "AND owner IS NOT NULL AND owner != '' GROUP BY owner HAVING c > 1"
+    ).fetchall()
+    if multi:
+        issues.append("owner(s) holding multiple active nodes (attention is "
+                      "one-at-a-time; delegate long-running work to running "
+                      "instead): " + ", ".join(f"{r['owner']} x{r['c']}"
+                                               for r in multi))
+    else:
+        ok.append("attention OK (no owner holds multiple active nodes)")
+
+    expired_ann = conn.execute(
+        "SELECT COUNT(*) c FROM announcements WHERE active=1 AND "
+        "expires_at IS NOT NULL AND "
+        "expires_at < strftime('%Y-%m-%dT%H:%M:%S','now')").fetchone()["c"]
+    if expired_ann:
+        issues.append(f"{expired_ann} expired announcement(s) still active - "
+                      f"clear with announce --clear")
+
     counts = {s: conn.execute(
         "SELECT COUNT(*) c FROM nodes WHERE state=?", (s,)).fetchone()["c"]
-        for s in ("proposed", "pending", "active", "blocked", "done")}
-    if not any(counts[s] for s in ("proposed", "pending", "active", "blocked")):
+        for s in OPEN_STATES + ("proposed", "done")}
+    if not any(counts[s] for s in OPEN_STATES + ("proposed",)):
         ok.append(f"chain at rest ({counts['done']} done) - harvest results "
                   f"or seed the next round")
 

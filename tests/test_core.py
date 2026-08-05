@@ -204,7 +204,7 @@ def test_query_filters_and_descendants(conn, grammar):
               grammar=Grammar(rules=[Rule("plan", "done", "impl", "approve")]))
     impls = [r["id"] for r in conn.execute(
         "SELECT id FROM nodes WHERE type='impl' "
-        "ORDER BY created_at, id").fetchall()]
+        "ORDER BY created_at, rowid").fetchall()]
     for i, owner in zip(impls, ("impl-a", "impl-b")):
         core.approve(conn, i)
         core.pull(conn, owner=owner)
@@ -441,3 +441,180 @@ def test_announce_clear(conn):
     rows = conn.execute(
         "SELECT text, active FROM announcements ORDER BY id").fetchall()
     assert rows[0]["active"] == 0 and rows[1]["active"] == 1
+
+
+def test_batch_successors_pulled_in_declaration_order(conn):
+    plan = core.propose(conn, "plan", "p")
+    core.approve(conn, plan)
+    core.pull(conn, owner="arch")
+    core.submit(conn, plan, owner="arch", status="done",
+                outputs=[{"path": "out/plan.md"}],
+                successors=[{"type": "task", "spec": "first"},
+                            {"type": "task", "spec": "second"},
+                            {"type": "task", "spec": "third"}])
+    kids = [n["id"] for n in core.query(conn, type="task")["nodes"]]
+    for k in kids:
+        core.approve(conn, k)
+    specs = []
+    for i in ("w1", "w2", "w3"):
+        r = core.pull(conn, owner=i)
+        specs.append(r["claimed"]["spec"])
+    assert specs == ["first", "second", "third"]
+
+
+def test_cancel_lifecycle(conn):
+    nid = core.propose(conn, "task", "t")
+    core.cancel(conn, nid, reason="superseded")
+    assert conn.execute("SELECT state FROM nodes WHERE id=?",
+                        (nid,)).fetchone()["state"] == "canceled"
+    with pytest.raises(core.GbError, match="already canceled"):
+        core.cancel(conn, nid)
+    assert core.pull(conn, owner="w")["claimed"] is None
+
+
+def test_cancel_active_running_blocked(conn):
+    a = core.propose(conn, "task", "a")
+    core.approve(conn, a)
+    core.pull(conn, owner="w")
+    core.cancel(conn, a, reason="abandoned")
+    assert conn.execute("SELECT state FROM nodes WHERE id=?",
+                        (a,)).fetchone()["state"] == "canceled"
+    b = core.propose(conn, "task", "b")
+    core.approve(conn, b)
+    core.pull(conn, owner="w")
+    core.delegate(conn, b, owner="w", resources="gpu:srv1")
+    core.cancel(conn, b, reason="machine died")
+    row = conn.execute("SELECT state, resources FROM nodes WHERE id=?",
+                       (b,)).fetchone()
+    assert row["state"] == "canceled" and row["resources"] is None
+
+
+def test_hold_and_release_cycle(conn):
+    nid = core.propose(conn, "task", "t")
+    core.approve(conn, nid)
+    core.hold(conn, nid, reason="human postponed")
+    assert conn.execute("SELECT state FROM nodes WHERE id=?",
+                        (nid,)).fetchone()["state"] == "blocked"
+    assert core.pull(conn, owner="w")["claimed"] is None
+    core.release(conn, nid)
+    r = core.pull(conn, owner="w")
+    assert r["claimed"]["id"] == nid
+    with pytest.raises(core.GbError, match="only proposed\\|pending"):
+        core.hold(conn, nid)
+
+
+def test_delegate_harvest_reactivate_cycle(conn):
+    nid = core.propose(conn, "task", "long work")
+    core.approve(conn, nid)
+    core.pull(conn, owner="exp-a")
+    r = core.delegate(conn, nid, owner="exp-a", resources="gpu:srv1;machine:srv2",
+                      note="tmux: n-x on srv1", check_after="2099-01-01T00:00:00Z")
+    assert r["state"] == "running"
+    row = conn.execute("SELECT state, owner, resources, check_after FROM nodes "
+                       "WHERE id=?", (nid,)).fetchone()
+    assert row["state"] == "running" and row["owner"] == "exp-a"
+    assert row["resources"] == "gpu:srv1;machine:srv2"
+    with pytest.raises(core.GbError, match="owned by"):
+        core.submit(conn, nid, owner="exp-b", status="done",
+                    outputs=[{"path": "o"}])
+    r = core.query(conn, state="running")
+    assert r["nodes"][0]["resources"] == "gpu:srv1;machine:srv2"
+    core.reactivate(conn, nid, owner="exp-a")
+    assert conn.execute("SELECT state FROM nodes WHERE id=?",
+                        (nid,)).fetchone()["state"] == "active"
+    core.delegate(conn, nid, owner="exp-a")
+    core.submit(conn, nid, owner="exp-a", status="done",
+                outputs=[{"path": "out/results.md"}])
+    row = conn.execute("SELECT state, resources, check_after FROM nodes "
+                       "WHERE id=?", (nid,)).fetchone()
+    assert row["state"] == "done" and row["resources"] is None \
+        and row["check_after"] is None
+
+
+def test_delegate_validation(conn):
+    nid = core.propose(conn, "task", "t")
+    with pytest.raises(core.GbError, match="only active"):
+        core.delegate(conn, nid, owner="w")
+    core.approve(conn, nid)
+    core.pull(conn, owner="w-a")
+    with pytest.raises(core.GbError, match="owned by"):
+        core.delegate(conn, nid, owner="w-b")
+
+
+def test_reactivate_validation(conn):
+    nid = core.propose(conn, "task", "t")
+    core.approve(conn, nid)
+    core.pull(conn, owner="w")
+    with pytest.raises(core.GbError, match="only running"):
+        core.reactivate(conn, nid, owner="w")
+
+
+def test_announcement_ttl(conn):
+    core.announce(conn, text="expires soon", ttl_days=-1)
+    core.announce(conn, text="still valid", ttl_days=7)
+    core.announce(conn, text="no expiry")
+    nid = core.propose(conn, "task", "t")
+    core.approve(conn, nid)
+    r = core.pull(conn, owner="w")
+    texts = [a["text"] for a in r["announcements"]]
+    assert "expires soon" not in texts
+    assert "still valid" in texts and "no expiry" in texts
+
+
+def test_submit_undeclared_auto_notice(conn):
+    g = Grammar(rules=[Rule("task", "done", "review", "auto")])
+    nid = core.propose(conn, "task", "t")
+    core.approve(conn, nid)
+    core.pull(conn, owner="w")
+    r = core.submit(conn, nid, owner="w", status="done",
+                    outputs=[{"path": "o"}], grammar=g)
+    assert any("task --done--> review" in n for n in r["notices"])
+    n2 = core.propose(conn, "task", "t2")
+    core.approve(conn, n2)
+    core.pull(conn, owner="w")
+    r = core.submit(conn, n2, owner="w", status="done",
+                    outputs=[{"path": "o"}],
+                    successors=[{"type": "review", "spec": "check it"}],
+                    grammar=g)
+    assert r["notices"] == []
+
+
+def test_migration_from_old_schema(tmp_path):
+    import sqlite3
+    dbpath = tmp_path / "old.db"
+    old = sqlite3.connect(dbpath)
+    old.executescript("""
+    CREATE TABLE nodes(
+      id TEXT PRIMARY KEY, type TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('proposed','pending','active',
+                                          'done','blocked','rejected')),
+      parent TEXT, on_event TEXT, owner TEXT, spec TEXT NOT NULL, note TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE announcements(id INTEGER PRIMARY KEY AUTOINCREMENT,
+      text TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL);
+    INSERT INTO nodes VALUES('n-old','task','done',NULL,NULL,'w','spec',
+      'note','2020-01-01T00:00:00.000Z','2020-01-01T00:00:00.000Z');
+    INSERT INTO announcements(text, active, created_at)
+      VALUES('hello', 1, '2020-01-01T00:00:00.000Z');
+    """)
+    old.commit()
+    old.close()
+    from graphboard import db
+    conn = db.connect(dbpath)
+    row = conn.execute("SELECT * FROM nodes WHERE id='n-old'").fetchone()
+    assert row["state"] == "done" and row["spec"] == "spec"
+    assert row["resources"] is None and row["check_after"] is None
+    assert "expires_at" in {r["name"] for r in
+                            conn.execute("PRAGMA table_info(announcements)")}
+    n = core.propose(conn, "task", "new era")
+    core.approve(conn, n)
+    core.pull(conn, owner="w")
+    core.delegate(conn, n, owner="w", resources="gpu:x")
+    core.cancel(conn, n, reason="test")
+    assert conn.execute("SELECT state FROM nodes WHERE id=?",
+                        (n,)).fetchone()["state"] == "canceled"
+    conn.close()
+    conn2 = db.connect(dbpath)
+    assert conn2.execute("SELECT COUNT(*) c FROM nodes").fetchone()["c"] == 2
+    conn2.close()
