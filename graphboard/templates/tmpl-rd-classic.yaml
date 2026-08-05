@@ -1,0 +1,6 @@
+default: approve
+transitions:
+  - {"from": proposal, "on": done, "to": implementation, activate: approve}
+  - {"from": implementation, "on": done, "to": acceptance, activate: auto}
+  - {"from": acceptance, "on": fail, "to": implementation, activate: auto, budget: 3}
+  - {"from": any, "on": blocked, "to": any, activate: approve}

@@ -1,0 +1,438 @@
+import argparse
+import os
+import sys
+from pathlib import Path
+
+from . import core, db, doctor, render, roles, scaffold
+from .gitutil import git_baseline
+from .grammar import (GrammarError, check, grammar_add_rule, grammar_remove_rule,
+                      load, load_nodetypes)
+
+
+class UsageError(Exception):
+    pass
+
+
+def resolve_board(args):
+    if getattr(args, "board", None):
+        d = Path(os.path.expanduser(args.board))
+        if not (d / "graph.db").exists():
+            raise UsageError(f"no board at {d}; run: gb init [dir]")
+        return d
+    env = os.environ.get("GB_BOARD", "")
+    if env:
+        d = Path(os.path.expanduser(env))
+        if not (d / "graph.db").exists():
+            raise UsageError(f"GB_BOARD points to {d} but no board there")
+        return d
+    cur = Path.cwd()
+    for d in [cur, *cur.parents]:
+        if (d / ".board" / "graph.db").exists():
+            return d / ".board"
+    raise UsageError("no board found (searched upward from cwd); run: gb init [dir]")
+
+
+def open_board(args):
+    board = resolve_board(args)
+    conn = db.connect(board / "graph.db")
+    grammar = None
+    gpath = board / "transitions.yaml"
+    if gpath.exists():
+        grammar = load(gpath)
+    contracts = load_nodetypes(board / "nodetypes.yaml")
+    return conn, grammar, contracts
+
+
+def cmd_init(args):
+    dir_ = args.dir or os.getcwd()
+    try:
+        result = scaffold.scaffold_project(
+            dir_, name=args.name, template=args.template,
+            agents=[a.strip() for a in args.agents.split(",") if a.strip()] or ["gb"],
+            git=args.git, force=args.force)
+    except core.GbError as e:
+        raise UsageError(str(e))
+    print(f"initialized project '{result['project']}' at {result['repo']}")
+    print(f"  board: {result['board']} ({result['board_action']}, "
+          f"template: {args.template})")
+    for action, path in result["agents"]:
+        print(f"  agent {action}: {path}")
+    print(f"  AGENTS.md: {result['agents_md']}")
+    print(f"  opencode.json: {result['config']}")
+    print(f"  git: {result['git']}")
+    print("\nnext: open opencode in this directory, switch to the gb role,")
+    print("and tell it what this project needs (roles, workflow, first node).")
+    return 0
+
+
+def cmd_list(args):
+    conn, _, _ = open_board(args)
+    if args.state:
+        rows = conn.execute(
+            "SELECT id, type, state, owner, spec FROM nodes WHERE state=? "
+            "ORDER BY created_at", (args.state,)).fetchall()
+        if not rows:
+            print(f"no {args.state} nodes")
+        for r in rows:
+            owner = f" [{r['owner']}]" if r["owner"] else ""
+            print(f"{r['id']} ({r['type']}){owner} {r['spec'].splitlines()[0]}")
+        return 0
+    print(render.render_status(core.status(conn)))
+    return 0
+
+
+def cmd_show(args):
+    conn, _, _ = open_board(args)
+    print(render.render_status(core.status(conn, args.id)))
+    return 0
+
+
+def cmd_query(args):
+    conn, _, _ = open_board(args)
+    result = core.query(conn, type=args.type, state=args.state, under=args.under,
+                        owner=args.owner, limit=args.limit)
+    print(render.render_query(result))
+    return 0
+
+
+def cmd_propose(args):
+    conn, _, _ = open_board(args)
+    nid = core.propose(conn, args.type, args.spec, parent=args.parent, on=args.on)
+    print(render.render_propose(nid))
+    return 0
+
+
+def cmd_pull(args):
+    conn, _, contracts = open_board(args)
+    result = core.pull(conn, args.owner, type_filter=args.type,
+                       contracts=contracts)
+    if result.get("claimed"):
+        baseline = git_baseline(resolve_board(args).parent)
+        if baseline:
+            dirty = "clean" if baseline["dirty"] == 0 else f"+{baseline['dirty']} dirty files"
+            result["claimed"]["baseline"] = f"{baseline['hash']} ({dirty})"
+    print(render.render_pull(result))
+    return 0
+
+
+def cmd_submit(args):
+    conn, grammar, _ = open_board(args)
+    r = core.submit(conn, args.id, owner=args.owner, status=args.status,
+                    outputs=core.parse_outputs(args.output),
+                    successors=core.parse_successors(args.succ),
+                    event=args.event, note=args.note, grammar=grammar)
+    print(render.render_submit(r))
+    return 0
+
+
+def cmd_split(args):
+    conn, grammar, _ = open_board(args)
+    r = core.split(conn, args.id, owner=args.owner,
+                   children=core.parse_successors(args.child), grammar=grammar)
+    print(render.render_split(r))
+    return 0
+
+
+def cmd_note(args):
+    conn, _, _ = open_board(args)
+    core.note(conn, args.id, args.text)
+    print(render.render_note(args.id))
+    return 0
+
+
+def cmd_approve(args):
+    conn, _, _ = open_board(args)
+    core.approve(conn, args.id, spec_edit=args.spec_edit)
+    print(render.render_approve(args.id))
+    return 0
+
+
+def cmd_reject(args):
+    conn, _, _ = open_board(args)
+    core.reject(conn, args.id)
+    print(render.render_reject(args.id))
+    return 0
+
+
+def cmd_announce(args):
+    conn, _, _ = open_board(args)
+    ann_id = core.announce(conn, text=args.text, clear=args.clear)
+    print(render.render_announce(ann_id, args.clear))
+    return 0
+
+
+def cmd_grammar_check(args):
+    if args.grammar:
+        gpath = Path(args.grammar)
+        npath = Path(args.nodetypes) if args.nodetypes else None
+    else:
+        board = resolve_board(args)
+        gpath, npath = board / "transitions.yaml", board / "nodetypes.yaml"
+        if not gpath.exists():
+            raise UsageError(f"no grammar at {gpath}")
+    g = load(gpath)
+    nodetypes = load_nodetypes(npath) if npath else {}
+    findings = check(g, nodetypes)
+    if not findings:
+        print("grammar OK")
+        return 0
+    errors = 0
+    for level, msg in findings:
+        print(f"{level}: {msg}")
+        errors += level == "error"
+    return 1 if errors else 0
+
+
+def cmd_grammar_add(args):
+    board = resolve_board(args)
+    findings = grammar_add_rule(board, args.frm, args.on, args.to,
+                                activate=args.activate, budget=args.budget)
+    print(f"added: {args.frm} --{args.on}--> {args.to} [{args.activate}]")
+    for level, msg in findings:
+        print(f"{level}: {msg}")
+    return 0
+
+
+def cmd_grammar_remove(args):
+    board = resolve_board(args)
+    grammar_remove_rule(board, args.frm, args.on, args.to)
+    print(f"removed: {args.frm} --{args.on}--> {args.to}")
+    return 0
+
+
+def cmd_role_new(args):
+    repo = Path(os.path.expanduser(args.repo))
+    claims = [c.strip() for c in args.claims.split(",") if c.strip()]
+    content = roles.render_role(
+        name=args.name, description=args.desc, claims=claims or ["task"],
+        duties=args.duties or "Work the claimed node according to its spec and contract.",
+        loading=args.loading or "Start from the node's inputs; use gb_query for anything else needed.",
+        outputs=args.outputs or "Code artifacts stay in the repo (commit your own files with explicit "
+                                "pathspec before submit); coordination artifacts go to the workdir.",
+        done_when=args.done_when or "The node spec's completion criteria are met and outputs are submitted.")
+    path = roles.write_role(repo, args.name, content, force=args.force)
+    print(f"wrote role: {path}")
+    if claims:
+        try:
+            board = resolve_board(args)
+        except UsageError:
+            board = None
+        if board:
+            added = roles.ensure_nodetypes(board, claims, args.desc)
+            if added:
+                print(f"node types added: {', '.join(added)}")
+            print(roles.suggest_grammar_rules(claims))
+    return 0
+
+
+def cmd_role_list(args):
+    for r in roles.list_roles(args.repo):
+        claims = f" claims: {r['claims']}" if r["claims"] else ""
+        print(f"{r['name']}: {r['description']}{claims}")
+    return 0
+
+
+def cmd_log(args):
+    conn, _, _ = open_board(args)
+    rows = core.events(conn, tool=args.tool, owner=args.owner,
+                       node_id=args.node, limit=args.limit)
+    if not rows:
+        print("no events match")
+        return 0
+    for r in rows:
+        owner = f" [{r['owner']}]" if r["owner"] else ""
+        node = f" {r['node_id']}" if r["node_id"] else ""
+        detail = f" {r['detail']}" if r["detail"] else ""
+        print(f"{r['ts']} {r['tool']}{owner}{node}{detail}")
+    return 0
+
+
+def cmd_doctor(args):
+    conn, grammar, _ = open_board(args)
+    board = resolve_board(args)
+    ok, issues = doctor.run_checks(conn, board, grammar,
+                                   stale_hours=args.stale_hours)
+    print(doctor.render_report(ok, issues))
+    return 1 if issues else 0
+
+
+def cmd_export(args):
+    conn, _, _ = open_board(args)
+    project = db.get_meta(conn, "project", "board")
+    lines = [f"# graphboard export: {project}", ""]
+    overview = core.status(conn)
+    lines.append("counts: " + ", ".join(f"{k}: {v}" for k, v in overview["counts"].items()))
+    lines.append("")
+    for state in ("active", "pending", "proposed", "blocked", "done", "rejected"):
+        rows = conn.execute(
+            "SELECT id, type, owner, spec, note FROM nodes WHERE state=? "
+            "ORDER BY created_at", (state,)).fetchall()
+        if not rows:
+            continue
+        lines.append(f"## {state}")
+        for r in rows:
+            owner = f" [{r['owner']}]" if r["owner"] else ""
+            lines.append(f"- {r['id']} ({r['type']}){owner}: {r['spec']}")
+            if r["note"]:
+                lines.append(f"  note: {r['note']}")
+        lines.append("")
+    edges = conn.execute(
+        "SELECT from_id, on_event, to_id FROM edges ORDER BY rowid").fetchall()
+    if edges:
+        lines.append("## edges")
+        lines.extend(f"- {e['from_id']} --{e['on_event']}--> {e['to_id']}" for e in edges)
+    text = "\n".join(lines) + "\n"
+    if args.file:
+        Path(args.file).write_text(text, encoding="utf-8")
+        print(f"exported to {args.file}")
+    else:
+        print(text)
+    return 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="gb", description="graphboard: graph-based task automaton")
+    parser.add_argument("--board", help="explicit board directory "
+                        "(default: $GB_BOARD, or nearest .board/ upward from cwd)")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("init", help="scaffold a self-contained project workspace")
+    p.add_argument("dir", nargs="?", help="project directory (default: cwd)")
+    p.add_argument("--name", help="project name (default: directory basename)")
+    p.add_argument("--template", default="minimal",
+                   help="grammar starter: minimal|rd-classic|experiment|branching")
+    p.add_argument("--agents", default="gb",
+                   help="comma-separated agent templates to install (default: gb only)")
+    p.add_argument("--git", action="store_true", help="git init if not a repo")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(fn=cmd_init)
+
+    p = sub.add_parser("list", help="show board overview or nodes by state")
+    p.add_argument("--state")
+    p.set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("show", help="show one node with lineage")
+    p.add_argument("id")
+    p.set_defaults(fn=cmd_show)
+
+    p = sub.add_parser("query", help="query nodes by type/state/under/owner")
+    p.add_argument("--type")
+    p.add_argument("--state")
+    p.add_argument("--under", help="subtree of this node id (inclusive)")
+    p.add_argument("--owner")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(fn=cmd_query)
+
+    p = sub.add_parser("propose", help="propose a new node (needs approval)")
+    p.add_argument("--type", required=True)
+    p.add_argument("--spec", required=True)
+    p.add_argument("--parent")
+    p.add_argument("--on")
+    p.set_defaults(fn=cmd_propose)
+
+    p = sub.add_parser("pull", help="claim the next pending node")
+    p.add_argument("--owner", required=True)
+    p.add_argument("--type")
+    p.set_defaults(fn=cmd_pull)
+
+    p = sub.add_parser("submit", help="finish the active node")
+    p.add_argument("id")
+    p.add_argument("--owner", required=True)
+    p.add_argument("--status", required=True, choices=("done", "blocked"))
+    p.add_argument("--event", help="semantic event (default: status)")
+    p.add_argument("--note")
+    p.add_argument("--output", action="append", metavar="PATH[:NOTE]")
+    p.add_argument("--succ", action="append", metavar="TYPE|SPEC")
+    p.set_defaults(fn=cmd_submit)
+
+    p = sub.add_parser("split", help="split an active node into smaller children")
+    p.add_argument("id")
+    p.add_argument("--owner", required=True)
+    p.add_argument("--child", action="append", required=True, metavar="TYPE|SPEC")
+    p.set_defaults(fn=cmd_split)
+
+    p = sub.add_parser("note", help="replace a node's anchor note")
+    p.add_argument("id")
+    p.add_argument("--text", required=True)
+    p.set_defaults(fn=cmd_note)
+
+    p = sub.add_parser("approve", help="activate a proposed node")
+    p.add_argument("id")
+    p.add_argument("--spec-edit")
+    p.set_defaults(fn=cmd_approve)
+
+    p = sub.add_parser("reject", help="reject a proposed node")
+    p.add_argument("id")
+    p.set_defaults(fn=cmd_reject)
+
+    p = sub.add_parser("announce", help="broadcast to all agents")
+    p.add_argument("text", nargs="?")
+    p.add_argument("--clear", action="store_true")
+    p.set_defaults(fn=cmd_announce)
+
+    p = sub.add_parser("grammar", help="grammar inspection and structured editing")
+    g_sub = p.add_subparsers(dest="grammar_cmd", required=True)
+    pg = g_sub.add_parser("check", help="static checks on the transition grammar")
+    pg.add_argument("--grammar", help="explicit grammar file (default: board's)")
+    pg.add_argument("--nodetypes", help="explicit nodetypes file")
+    pg.set_defaults(fn=cmd_grammar_check)
+    pg = g_sub.add_parser("add", help="add a transition rule (validated before write)")
+    pg.add_argument("--from", dest="frm", required=True)
+    pg.add_argument("--on", required=True)
+    pg.add_argument("--to", required=True)
+    pg.add_argument("--activate", choices=("auto", "approve"), default="approve")
+    pg.add_argument("--budget", type=int, default=0)
+    pg.set_defaults(fn=cmd_grammar_add)
+    pg = g_sub.add_parser("remove", help="remove a transition rule")
+    pg.add_argument("--from", dest="frm", required=True)
+    pg.add_argument("--on", required=True)
+    pg.add_argument("--to", required=True)
+    pg.set_defaults(fn=cmd_grammar_remove)
+
+    p = sub.add_parser("role", help="role management")
+    role_sub = p.add_subparsers(dest="role_cmd", required=True)
+    pr = role_sub.add_parser("new", help="generate a role file from the paradigm")
+    pr.add_argument("name")
+    pr.add_argument("--repo", required=True)
+    pr.add_argument("--desc", required=True)
+    pr.add_argument("--claims", default="", help="comma-separated node types")
+    pr.add_argument("--duties")
+    pr.add_argument("--loading")
+    pr.add_argument("--outputs")
+    pr.add_argument("--done-when", dest="done_when")
+    pr.add_argument("--force", action="store_true")
+    pr.set_defaults(fn=cmd_role_new)
+    pr = role_sub.add_parser("list", help="list roles in a repo")
+    pr.add_argument("--repo", required=True)
+    pr.set_defaults(fn=cmd_role_list)
+
+    p = sub.add_parser("log", help="show the event audit trail")
+    p.add_argument("--tool")
+    p.add_argument("--owner")
+    p.add_argument("--node")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(fn=cmd_log)
+
+    p = sub.add_parser("doctor", help="read-only consistency health check")
+    p.add_argument("--stale-hours", type=float, default=24.0)
+    p.set_defaults(fn=cmd_doctor)
+
+    p = sub.add_parser("export", help="dump the graph as markdown")
+    p.add_argument("file", nargs="?")
+    p.set_defaults(fn=cmd_export)
+
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        return args.fn(args)
+    except (UsageError, core.GbError, GrammarError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,7 @@
+default: approve
+transitions:
+  - {"from": hypothesis, "on": done, "to": experiment, activate: approve}
+  - {"from": experiment, "on": done, "to": analysis, activate: auto}
+  - {"from": experiment, "on": fail, "to": experiment, activate: auto, budget: 3}
+  - {"from": analysis, "on": done, "to": writeup, activate: auto}
+  - {"from": any, "on": blocked, "to": any, activate: approve}

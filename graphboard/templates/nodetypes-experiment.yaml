@@ -1,0 +1,22 @@
+types:
+  hypothesis:
+    emits: [done, blocked]
+    contract: |
+      State a testable hypothesis with predicted outcomes and the
+      experiment that would discriminate it from alternatives.
+  experiment:
+    emits: [done, fail, blocked]
+    contract: |
+      Run the experiment described in inputs. Log raw data and exact
+      commands under this node's out/. Event fail means the run itself
+      broke and should be retried, not that the hypothesis was refuted.
+  analysis:
+    emits: [done, blocked]
+    contract: |
+      Analyze experiment outputs against the hypothesis predictions.
+      Report whether the hypothesis is supported, refuted, or inconclusive.
+  writeup:
+    emits: [done, blocked]
+    contract: |
+      Draft the section/paper content summarizing the chain of results,
+      citing node output paths.

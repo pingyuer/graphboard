@@ -1,0 +1,8 @@
+default: approve
+transitions:
+  - {"from": plan, "on": done, "to": implementation, activate: approve}
+  - {"from": implementation, "on": done, "to": review, activate: approve}
+  - {"from": review, "on": done, "to": harvest, activate: approve}
+  - {"from": review, "on": fail, "to": implementation, activate: auto, budget: 3}
+  - {"from": harvest, "on": done, "to": any, activate: approve}
+  - {"from": any, "on": blocked, "to": any, activate: approve}

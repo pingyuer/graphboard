@@ -1,0 +1,26 @@
+types:
+  plan:
+    emits: [done, blocked]
+    contract: |
+      Crystallize the discussion into self-contained work items. Each successor
+      spec must be understandable by a fresh session with no prior context:
+      goal, constraints, and completion criteria included in the spec itself.
+  implementation:
+    emits: [done, blocked]
+    contract: |
+      Implement exactly what the spec says. Code artifacts stay in the repo
+      where they belong; write a short report into your workdir. Submit done
+      only when the spec's completion criteria are met, otherwise blocked.
+  review:
+    emits: [done, fail]
+    contract: |
+      Load the work to review with gb_query (e.g. under=<plan node>
+      type=implementation state=done), read each output, then judge against
+      the spec criteria. event done = pass; event fail = send back for rework
+      with the failures listed in your output. Never fix the work yourself.
+  harvest:
+    emits: [done, blocked]
+    contract: |
+      Collect the whole subtree with gb_query under=<root>, read the review
+      verdicts, then either declare successors for the next round or keep the
+      node active for deeper discussion with the human.

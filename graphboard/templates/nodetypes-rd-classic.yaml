@@ -1,0 +1,19 @@
+types:
+  proposal:
+    emits: [done, blocked]
+    contract: |
+      Produce a proposal document under this node's out/ directory.
+      It must contain: a falsifiable goal, an approach sketch, and
+      explicit completion criteria the acceptance node can check.
+  implementation:
+    emits: [done, blocked]
+    contract: |
+      Implement according to the input proposal. All artifacts go under
+      this node's out/ directory. Submit done only when the proposal's
+      completion criteria are met; otherwise submit blocked with a reason.
+  acceptance:
+    emits: [done, fail]
+    contract: |
+      Verify the implementation against the proposal's completion criteria.
+      Submit done (event done) if all criteria pass; submit done with
+      event fail if any criterion fails, listing failures in the output.
