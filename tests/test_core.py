@@ -238,6 +238,39 @@ def test_pull_creates_workdir(conn):
     assert Path(workdir).is_dir()
 
 
+def test_release_and_reattach(conn):
+    nid = seed_pending(conn, "task", "long work")
+    core.pull(conn, owner="w-a")
+    core.note(conn, nid, "tmux session running, 50%")
+    core.release(conn, nid, reason="session died")
+    row = conn.execute("SELECT state, owner, note FROM nodes WHERE id=?",
+                       (nid,)).fetchone()
+    assert row["state"] == "pending" and row["owner"] is None
+    assert row["note"] == "tmux session running, 50%"
+    r = core.pull(conn, owner="w-b")
+    assert r["claimed"]["id"] == nid
+    core.submit(conn, nid, owner="w-b", status="done", outputs=[{"path": "o"}])
+
+
+def test_release_validation(conn):
+    nid = seed_pending(conn)
+    with pytest.raises(core.GbError, match="only active\\|blocked"):
+        core.release(conn, nid)
+    core.pull(conn, owner="w-a")
+    core.submit(conn, nid, owner="w-a", status="done", outputs=[{"path": "o"}])
+    with pytest.raises(core.GbError, match="only active\\|blocked"):
+        core.release(conn, nid)
+
+
+def test_release_blocked_node(conn):
+    nid = seed_pending(conn)
+    core.pull(conn, owner="w-a")
+    core.submit(conn, nid, owner="w-a", status="blocked", note="waiting")
+    core.release(conn, nid, reason="unblocked by human")
+    assert conn.execute("SELECT state FROM nodes WHERE id=?",
+                        (nid,)).fetchone()["state"] == "pending"
+
+
 def test_propose_with_parent_records_edge(conn):
     parent = core.propose(conn, "plan", "p")
     child = core.propose(conn, "task", "c", parent=parent)

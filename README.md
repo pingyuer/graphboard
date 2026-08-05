@@ -121,6 +121,8 @@ gb：根节点已播下。新开一个会话切到提案角色，说「pull 你�
   owner，其他脑子可认领碎片）；子节点全部 done 时父节点自动回到 pending 待收拢。
   任务怎么切，上下文就怎么切。
 - **文法**：`transitions.yaml`，结构化编辑（写前 `gb grammar check` 校验，非法拒绝落盘）。
+  引用未声明的节点类型会**自动声明**（占位 contract，doctor 会提醒你补全）；
+  闭环无根默认拒绝（错误信息附两条出路），`force` 可显式接受。
 - **角色**：按范式生成的数据（`gba_role` / `gb role new`），进 git 可审可回滚。
 - **装载三层旋钮**：`gb_query`（清单+摘要）→ 原生 read（具体文件）→ 不读。
   边只记谱系，不决定你该读什么——fan-in 靠查询，不靠布线。
@@ -133,7 +135,7 @@ gb：根节点已播下。新开一个会话切到提案角色，说「pull 你�
 | 命名空间 | 工具 | 谁可用 |
 |---|---|---|
 | `gb_*` 工作 | pull / submit / split / propose / note / status / query / doctor | 全体角色 |
-| `gba_*` 治理 | approve / reject / announce / role / grammar / bootstrap / export | 仅 gb |
+| `gba_*` 治理 | approve / reject / release / announce / role / grammar / bootstrap / export | 仅 gb |
 
 `gb init` 生成的 opencode.json 里 `gba_*` 全局禁用、gb 覆盖启用——之后生成的
 任何新角色自动无权，零维护保住权力边界。
@@ -175,6 +177,21 @@ gb grammar remove --from X --on E --to Y
 | rd-classic | proposal → implementation → acceptance；fail 自动返工 budget 3 |
 | branching | plan → implementation×N → review（查询聚合）→ harvest |
 | experiment | hypothesis → experiment → analysis → writeup |
+
+## 会话死亡与接管（release 协议）
+
+长时节点（训练跑几小时）期间 worker 会话可能死掉。状态图显式管理这件事：
+
+```
+1. 发现：doctor 报「possibly orphaned」（active 节点超过 --orphan-hours 无更新）
+2. 释放：gb 或人确认会话已死 → gba_release <id> → 节点回 pending，
+         owner 清空，anchor note 保留，events 留痕
+3. 接管：新 worker pull 到节点 → 读 note 里的锚点（tmux 会话名/server/进度）
+         → 确认远端进程还活着 → 继续，用自己的 owner 名 submit
+```
+
+配套纪律：worker 有实质进展就 `gb_note` 一次——锚点即心跳，note 的新鲜度
+就是 doctor 判断失联的依据。不做自动超时释放：判定死亡是需要上下文的人类判断。
 
 ## 多 agent 的 git 管理
 
@@ -241,7 +258,8 @@ graphboard/
 ## 测试
 
 ```bash
-python3 -m pytest tests/ -q   # 91 tests：竞态认领/裁决矩阵/文法检查/query/
-                              # split 生命周期与重激活/角色生成/治理工具/
-                              # init 脚手架与 git 矩阵/e2e 双情景/MCP 层
+python3 -m pytest tests/ -q   # 101 tests：竞态认领/裁决矩阵/文法检查（swap/闭环/
+                              # 自动声明）/query/split 生命周期/release 接管/
+                              # 角色生成与更新/治理工具/init 脚手架与 git 矩阵/
+                              # e2e 双情景/MCP 层
 ```

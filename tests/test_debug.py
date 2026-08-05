@@ -171,6 +171,42 @@ def test_cli_split_via_cli(tmp_path, capsys):
     assert "split -> blocked" in out and out.count("child: ") == 2
 
 
+def test_cli_doctor_flags_orphaned_active(board, capsys):
+    conn = db.connect(board / "graph.db")
+    nid = core.propose(conn, "task", "t")
+    core.approve(conn, nid)
+    core.pull(conn, owner="w-a")
+    conn.execute("UPDATE nodes SET updated_at='2020-01-01T00:00:00.000Z' "
+                 "WHERE id=?", (nid,))
+    conn.commit()
+    conn.close()
+    assert cli.main(["--board", str(board), "doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "orphaned" in out and nid in out
+
+
+def test_cli_doctor_flags_placeholder_contract(tmp_path, capsys):
+    proj = tmp_path / "proj"
+    assert cli.main(["init", str(proj)]) == 0
+    from graphboard.grammar import declare_nodetype
+    declare_nodetype(proj / ".board", "mystery")
+    assert cli.main(["--board", str(proj / ".board"), "doctor"]) == 1
+    assert "placeholder contract" in capsys.readouterr().out
+
+
+def test_cli_release_via_cli(tmp_path, capsys):
+    proj = tmp_path / "proj"
+    assert cli.main(["init", str(proj)]) == 0
+    capsys.readouterr()
+    b = str(proj / ".board")
+    assert cli.main(["--board", b, "propose", "--type", "task", "--spec", "t"]) == 0
+    nid = capsys.readouterr().out.split()[1]
+    assert cli.main(["--board", b, "approve", nid]) == 0
+    assert cli.main(["--board", b, "pull", "--owner", "w-a"]) == 0
+    assert cli.main(["--board", b, "release", nid, "--reason", "died"]) == 0
+    assert "released" in capsys.readouterr().out
+
+
 def test_server_log_written(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     monkeypatch.setenv("GB_BOARD", str(proj / ".board"))

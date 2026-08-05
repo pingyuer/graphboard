@@ -16,6 +16,15 @@ def register(server, infra):
             return render.render_approve(id)
         return guard("gba_approve", {"id": id, "spec_edit": spec_edit, "reject": reject}, run)
 
+    @server.tool(description="GOVERNANCE (gb conductor only). Release an orphaned active (or blocked) "
+                             "node back to pending after verifying its owner session is dead. The anchor "
+                             "note is preserved so a new worker can re-pull and re-orient.")
+    def gba_release(id: str, reason: str = "") -> str:
+        def run(conn):
+            core.release(conn, id, reason=reason)
+            return render.render_release(id)
+        return guard("gba_release", {"id": id, "reason": reason}, run)
+
     @server.tool(description="GOVERNANCE (gb conductor only). Broadcast an announcement on explicit human "
                              "instruction; delivered to agents on their next gb_pull.")
     def gba_announce(text: str) -> str:
@@ -35,17 +44,21 @@ def register(server, infra):
             return f"bootstrapped board at {d} (template: {template})"
         return guard_plain("gba_bootstrap", {"template": template}, run)
 
-    @server.tool(description="GOVERNANCE (gb conductor only). Register a new role after the human confirmed "
-                             "the draft. claims: comma-separated node types. Ensures node types exist and "
-                             "suggests grammar rules (never writes the grammar).")
+    @server.tool(description="GOVERNANCE (gb conductor only). Register or update a role after the human "
+                             "confirmed the draft. action: register (new role) | update (full re-render of "
+                             "an existing role - provide ALL slots again). claims: comma-separated node types. "
+                             "Ensures node types exist and suggests grammar rules (never writes the grammar).")
     def gba_role(name: str, description: str, claims: str, duties: str = "",
-                 loading: str = "", outputs: str = "", done_when: str = "") -> str:
+                 loading: str = "", outputs: str = "", done_when: str = "",
+                 action: str = "register") -> str:
         def run():
             repo = infra.repo()
             board_dir = infra.project_paths()
             claim_list = [c.strip() for c in claims.split(",") if c.strip()]
             if not claim_list:
                 raise core.GbError("claims must list at least one node type")
+            if action not in ("register", "update"):
+                raise core.GbError(f"action must be register|update, got {action!r}")
             content = roles.render_role(
                 name=name, description=description, claims=claim_list,
                 duties=duties or "Work the claimed node according to its spec and contract.",
@@ -53,23 +66,26 @@ def register(server, infra):
                 outputs=outputs or "Code artifacts stay in the repo (commit your own files with explicit "
                                    "pathspec before submit); coordination artifacts go to the workdir.",
                 done_when=done_when or "The node spec's completion criteria are met and outputs are submitted.")
-            path = roles.write_role(repo, name, content)
+            path = roles.write_role(repo, name, content, force=(action == "update"))
             added = roles.ensure_nodetypes(board_dir, claim_list, description)
-            lines = [f"role registered: {path}"]
+            lines = [f"role {'updated' if action == 'update' else 'registered'}: {path}"]
             if added:
                 lines.append(f"node types added to nodetypes.yaml: {', '.join(added)}")
             lines.append(roles.suggest_grammar_rules(claim_list))
             lines.append("open a new session and switch to this role to use it")
             return "\n".join(lines)
         return guard_plain("gba_role", {"name": name, "description": description,
-                                        "claims": claims}, run)
+                                        "claims": claims, "action": action}, run)
 
     @server.tool(description="GOVERNANCE (gb conductor only). Grammar editing on explicit human instruction. "
                              "action: list|add|remove. Format: FROM_TYPE --event--> TO_TYPE (from_type/event/"
-                             "to_type params). Validated before writing; swapped or invalid rules are refused.")
+                             "to_type params). Unknown node types are auto-declared with a placeholder contract. "
+                             "Validated before writing; swapped or invalid rules are refused. force=true accepts "
+                             "a closed cycle without root (seedable via propose only).")
     def gba_grammar(action: str = "list", from_type: str = "", event: str = "",
                     to_type: str = "", frm: str = "", on: str = "", to: str = "",
-                    activate: str = "approve", budget: int = 0) -> str:
+                    activate: str = "approve", budget: int = 0,
+                    force: bool = False) -> str:
         frm = from_type or frm
         on = event or on
         to = to_type or to
@@ -85,7 +101,8 @@ def register(server, infra):
                 return "\n".join(lines)
             if action == "add":
                 findings = grammar_add_rule(board_dir, frm, on, to,
-                                            activate=activate, budget=budget or None)
+                                            activate=activate, budget=budget or None,
+                                            force=force)
             elif action == "remove":
                 findings = grammar_remove_rule(board_dir, frm, on, to)
             else:
@@ -98,7 +115,8 @@ def register(server, infra):
             return "\n".join(lines)
         return guard_plain("gba_grammar", {"action": action, "from_type": frm,
                                            "event": on, "to_type": to,
-                                           "activate": activate, "budget": budget}, run)
+                                           "activate": activate, "budget": budget,
+                                           "force": force}, run)
 
     @server.tool(description="GOVERNANCE (gb conductor only). Dump the whole graph as markdown "
                              "(counts, nodes by state).")

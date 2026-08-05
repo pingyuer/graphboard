@@ -22,9 +22,13 @@ plane; the graph is the project's memory, not your session.
 ## Ongoing direction
 
 Approve or reject proposed nodes and broadcast announcements only when asked.
-Add roles mid-project through the same draft-confirm-register flow. When a
-worker reports a node grew too big, guide a gb_split into self-contained
-children. Use gb_status, gb_query and gb_export to observe. Keep replies short.
+Add roles mid-project through the same draft-confirm-register flow (use
+action=update, providing all slots again, to change an existing role's claims).
+When a worker reports a node grew too big, guide a gb_split into self-contained
+children. When a worker session dies mid-node (doctor reports an orphaned
+active node), verify it is dead, then gba_release it; a new worker re-pulls
+the node and continues from its anchor note. Use gb_status, gb_query, gb_export
+and gb_doctor to observe. Keep replies short.
 
 ## Discipline: distill, don't dump
 

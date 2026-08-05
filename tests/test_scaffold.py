@@ -105,6 +105,18 @@ def test_grammar_add_rejects_swapped_rule(project):
     assert isinstance(findings, list)
 
 
+def test_grammar_closed_cycle_force(tmp_path):
+    board, _ = scaffold.init_board(tmp_path / "board", template="minimal")
+    grammar_add_rule(board, "a", "done", "b")
+    with pytest.raises(GrammarError, match="no root") as exc:
+        grammar_add_rule(board, "b", "done", "a")
+    assert "fixes:" in str(exc.value)
+    findings = grammar_add_rule(board, "b", "done", "a", force=True)
+    assert any(lvl == "warning" and "no root" in msg for lvl, msg in findings)
+    g = load(board / "transitions.yaml")
+    assert len(g.rules) == 2
+
+
 def test_git_baseline(tmp_path):
     import subprocess
     repo = tmp_path / "repo"

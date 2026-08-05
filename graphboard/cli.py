@@ -133,6 +133,13 @@ def cmd_split(args):
     return 0
 
 
+def cmd_release(args):
+    conn, _, _ = open_board(args)
+    core.release(conn, args.id, reason=args.reason or "")
+    print(render.render_release(args.id))
+    return 0
+
+
 def cmd_note(args):
     conn, _, _ = open_board(args)
     core.note(conn, args.id, args.text)
@@ -186,7 +193,8 @@ def cmd_grammar_check(args):
 def cmd_grammar_add(args):
     board = resolve_board(args)
     findings = grammar_add_rule(board, args.frm, args.on, args.to,
-                                activate=args.activate, budget=args.budget)
+                                activate=args.activate, budget=args.budget,
+                                force=args.force)
     print(f"added: {args.frm} --{args.on}--> {args.to} [{args.activate}]")
     for level, msg in findings:
         print(f"{level}: {msg}")
@@ -251,7 +259,8 @@ def cmd_doctor(args):
     conn, grammar, _ = open_board(args)
     board = resolve_board(args)
     ok, issues = doctor.run_checks(conn, board, grammar,
-                                   stale_hours=args.stale_hours)
+                                   stale_hours=args.stale_hours,
+                                   orphan_hours=args.orphan_hours)
     print(doctor.render_report(ok, issues))
     return 1 if issues else 0
 
@@ -352,6 +361,12 @@ def build_parser():
     p.add_argument("--child", action="append", required=True, metavar="TYPE|SPEC")
     p.set_defaults(fn=cmd_split)
 
+    p = sub.add_parser("release", help="release an orphaned active/blocked node "
+                                       "back to pending (owner cleared)")
+    p.add_argument("id")
+    p.add_argument("--reason")
+    p.set_defaults(fn=cmd_release)
+
     p = sub.add_parser("note", help="replace a node's anchor note")
     p.add_argument("id")
     p.add_argument("--text", required=True)
@@ -383,6 +398,8 @@ def build_parser():
     pg.add_argument("--to", required=True)
     pg.add_argument("--activate", choices=("auto", "approve"), default="approve")
     pg.add_argument("--budget", type=int, default=0)
+    pg.add_argument("--force", action="store_true",
+                    help="accept a closed cycle without root (seedable via propose only)")
     pg.set_defaults(fn=cmd_grammar_add)
     pg = g_sub.add_parser("remove", help="remove a transition rule")
     pg.add_argument("--from", dest="frm", required=True)
@@ -416,6 +433,7 @@ def build_parser():
 
     p = sub.add_parser("doctor", help="read-only consistency health check")
     p.add_argument("--stale-hours", type=float, default=24.0)
+    p.add_argument("--orphan-hours", type=float, default=4.0)
     p.set_defaults(fn=cmd_doctor)
 
     p = sub.add_parser("export", help="dump the graph as markdown")

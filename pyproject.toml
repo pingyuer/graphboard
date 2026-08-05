@@ -1,6 +1,6 @@
 [project]
 name = "graphboard"
-version = "0.1.1"
+version = "0.1.2"
 description = "Graph-based task automaton for multi-agent research workflows"
 requires-python = ">=3.10"
 dependencies = ["PyYAML>=6", "mcp>=2"]

@@ -2,9 +2,8 @@ import os
 import re
 from pathlib import Path
 
-import yaml
-
 from .core import GbError
+from .grammar import declare_nodetype
 
 
 def render_role(name, description, claims, duties, loading, outputs, done_when):
@@ -48,22 +47,7 @@ def write_role(repo, name, content, force=False):
 
 
 def ensure_nodetypes(board_dir, claims, contract):
-    board_dir = Path(board_dir)
-    path = board_dir / "nodetypes.yaml"
-    data = {}
-    if path.exists():
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    types = data.setdefault("types", {})
-    added = []
-    for t in claims:
-        if t in types:
-            continue
-        types[t] = {"emits": ["done", "blocked"], "contract": contract}
-        added.append(t)
-    if added:
-        path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
-                        encoding="utf-8")
-    return added
+    return [t for t in claims if declare_nodetype(board_dir, t, contract)]
 
 
 def suggest_grammar_rules(claims):

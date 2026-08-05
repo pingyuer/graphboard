@@ -230,6 +230,50 @@ def test_mcp_split_roundtrip(env):
     assert "reactivated parent" in text
 
 
+def test_mcp_release_reattach_flow(env):
+    server, board, _ = env
+    out = call(server, "gb_propose", {"type": "task", "spec": "long work"})
+    nid = out.split()[1]
+    call(server, "gba_approve", {"id": nid})
+    call(server, "gb_pull", {"owner": "w-a"})
+    call(server, "gb_note", {"id": nid, "text": "tmux: n-x on srv1, 50% done"})
+    text = call(server, "gba_release", {"id": nid, "reason": "session died"})
+    assert "released" in text
+    text = call(server, "gb_pull", {"owner": "w-b"})
+    assert f"claimed: {nid}" in text and "tmux: n-x on srv1" in text
+    text = call(server, "gb_submit", {"id": nid, "owner": "w-b",
+                                      "status": "done", "outputs": "out/x"})
+    assert "done" in text
+
+
+def test_mcp_role_update(env):
+    server, board, repo = env
+    call(server, "gba_role", {"name": "scout2", "description": "v1.",
+                              "claims": "survey"})
+    text = call(server, "gba_role", {"name": "scout2", "description": "v2.",
+                                     "claims": "survey,deepdive",
+                                     "duties": "updated duties.",
+                                     "action": "update"})
+    assert "role updated" in text
+    assert "node types added to nodetypes.yaml: deepdive" in text
+    content = (repo / ".opencode" / "agents" / "scout2.md").read_text()
+    assert "description: v2." in content and "updated duties." in content
+
+
+def test_mcp_grammar_autodeclare(env):
+    server, board, _ = env
+    text = call(server, "gba_grammar", {"action": "add", "from_type": "mystery",
+                                        "event": "done", "to_type": "enigma"})
+    assert "auto-declared node type 'mystery'" in text
+    assert "auto-declared node type 'enigma'" in text
+    import yaml
+    nt = yaml.safe_load((board / "nodetypes.yaml").read_text())
+    assert nt["types"]["mystery"]["contract"].startswith("TODO")
+    text = call(server, "gba_grammar", {"action": "add", "from_type": "enigma",
+                                        "event": "done", "to_type": "mystery"})
+    assert "grammar updated" in text and "unreachable" in text
+
+
 def test_mcp_doctor_tool(env):
     server, board, _ = env
     text = call(server, "gb_doctor", {})
@@ -256,7 +300,7 @@ def test_mcp_tool_surface(env):
         "gb_pull", "gb_submit", "gb_split", "gb_propose", "gb_status",
         "gb_query", "gb_note", "gb_doctor",
         "gba_approve", "gba_announce", "gba_bootstrap", "gba_role",
-        "gba_grammar", "gba_export"])
+        "gba_grammar", "gba_export", "gba_release"])
 
 
 def test_mcp_errors_are_textual(env):

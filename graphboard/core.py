@@ -391,6 +391,18 @@ def status(conn, node_id=None):
     return {"counts": counts, "open": open_nodes}
 
 
+def release(conn, node_id, reason=""):
+    node = _node_or_fail(conn, "release", "", node_id)
+    if node["state"] not in ("active", "blocked"):
+        _fail(conn, "release", "", node_id,
+              f"node {node_id} is {node['state']}, only active|blocked can be released")
+    conn.execute(
+        "UPDATE nodes SET state='pending', owner=NULL, updated_at=? WHERE id=?",
+        (now_iso(), node_id))
+    _event(conn, "release", "", node_id, reason or "released to pending")
+    conn.commit()
+
+
 def note(conn, node_id, text):
     _node_or_fail(conn, "note", "", node_id)
     conn.execute("UPDATE nodes SET note=?, updated_at=? WHERE id=?",

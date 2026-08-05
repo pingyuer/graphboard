@@ -6,7 +6,7 @@ from .grammar import EVENT_WORDS, check, load_nodetypes
 OWNER_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 
 
-def run_checks(conn, board, grammar, stale_hours=24.0):
+def run_checks(conn, board, grammar, stale_hours=24.0, orphan_hours=4.0):
     board = Path(board)
     ok, issues = [], []
 
@@ -16,7 +16,8 @@ def run_checks(conn, board, grammar, stale_hours=24.0):
     if grammar is None:
         issues.append("no transitions.yaml found")
     else:
-        findings = check(grammar, load_nodetypes(board / "nodetypes.yaml"))
+        nodetypes = load_nodetypes(board / "nodetypes.yaml")
+        findings = check(grammar, nodetypes)
         errors = [m for lvl, m in findings if lvl == "error"]
         if errors:
             issues.extend(f"grammar error: {m}" for m in errors)
@@ -27,6 +28,15 @@ def run_checks(conn, board, grammar, stale_hours=24.0):
                 issues.append(f"grammar rule looks swapped: {r.frm} --{r.on}--> "
                               f"{r.to} (from_type should be a node type, not an "
                               f"event); fix with grammar remove/add")
+
+    nodetypes = load_nodetypes(board / "nodetypes.yaml")
+    placeholders = [t for t, spec in nodetypes.items()
+                    if isinstance(spec, dict) and
+                    str(spec.get("contract", "")).startswith("TODO")]
+    if placeholders:
+        issues.append("placeholder contract(s) not filled in: "
+                      + ", ".join(placeholders)
+                      + " - edit nodetypes.yaml")
 
     owned = conn.execute(
         "SELECT id, owner FROM nodes WHERE owner IS NOT NULL AND owner != ''"
@@ -67,11 +77,25 @@ def run_checks(conn, board, grammar, stale_hours=24.0):
         ok.append("no phantom claims")
 
     orphaned = conn.execute(
+        "SELECT id, owner FROM nodes WHERE state='active' AND "
+        "updated_at < strftime('%Y-%m-%dT%H:%M:%S','now',?)",
+        (f"-{float(orphan_hours)} hours",)).fetchall()
+    if orphaned:
+        issues.append("possibly orphaned active node(s), no update for >"
+                      f"{orphan_hours}h: "
+                      + ", ".join(f"{r['id']} [{r['owner'] or '-'}]"
+                                  for r in orphaned)
+                      + " - verify the owner session is alive; if dead, "
+                        "release the node so a new worker can re-pull it")
+    else:
+        ok.append("no orphaned active nodes")
+
+    orphaned_parents = conn.execute(
         "SELECT p.id FROM nodes p JOIN nodes c ON c.parent=p.id "
         "WHERE p.state='blocked' AND c.state='rejected'").fetchall()
-    if orphaned:
+    if orphaned_parents:
         issues.append("blocked parent with rejected child (decide manually): "
-                      + ", ".join(r["id"] for r in orphaned))
+                      + ", ".join(r["id"] for r in orphaned_parents))
 
     counts = {s: conn.execute(
         "SELECT COUNT(*) c FROM nodes WHERE state=?", (s,)).fetchone()["c"]

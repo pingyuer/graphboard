@@ -27,6 +27,8 @@ def render_pull(result):
         f"type: {c['type']}",
         f"spec: {c['spec']}",
     ]
+    if c.get("note"):
+        lines.append(f"note: {c['note']}")
     if c.get("workdir"):
         lines.append(f"workdir: {c['workdir']}")
     if c.get("baseline"):
@@ -129,6 +131,10 @@ def render_query(result):
     if result.get("truncated"):
         lines.append("... (limit reached, narrow the query)")
     return "\n".join(lines)
+
+
+def render_release(node_id):
+    return f"released: {node_id} -> pending (owner cleared, anchor note preserved)"
 
 
 def render_note(node_id):

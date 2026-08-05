@@ -6,6 +6,23 @@ import yaml
 UNIVERSAL_EVENTS = ("done", "blocked")
 ACTIVATE_MODES = ("auto", "approve")
 EVENT_WORDS = {"done", "blocked", "fail", "approved", "rejected"}
+PLACEHOLDER_CONTRACT = ("TODO: describe this node type's contract "
+                        "(auto-declared placeholder)")
+
+
+def declare_nodetype(board_dir, ntype, contract=None):
+    path = Path(board_dir) / "nodetypes.yaml"
+    data = {}
+    if path.exists():
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    types = data.setdefault("types", {})
+    if ntype in types:
+        return False
+    types[ntype] = {"emits": list(UNIVERSAL_EVENTS),
+                    "contract": contract or PLACEHOLDER_CONTRACT}
+    path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+                    encoding="utf-8")
+    return True
 
 
 @dataclass
@@ -157,9 +174,10 @@ def check(g: Grammar, nodetypes: dict | None = None):
             findings.append(("warning", f"type '{t}' is isolated (no edges)"))
 
     for r in g.rules:
-        if r.to != "any" and nodetypes and r.to not in nodetypes:
-            findings.append(("warning",
-                f"type '{r.to}' referenced but not defined in nodetypes"))
+        for t in (r.frm, r.to):
+            if t != "any" and nodetypes and t not in nodetypes:
+                findings.append(("warning",
+                    f"type '{t}' referenced but not defined in nodetypes"))
 
     return findings
 
@@ -203,7 +221,8 @@ def _load_raw_grammar(board_dir):
     return path, data
 
 
-def grammar_add_rule(board_dir, frm, on, to, activate="approve", budget=None):
+def grammar_add_rule(board_dir, frm, on, to, activate="approve", budget=None,
+                     force=False):
     path, data = _load_raw_grammar(board_dir)
     nodetypes = load_nodetypes(Path(board_dir) / "nodetypes.yaml")
     if frm in EVENT_WORDS:
@@ -215,17 +234,32 @@ def grammar_add_rule(board_dir, frm, on, to, activate="approve", budget=None):
         raise GrammarError(
             f"looks swapped: '{on}' is a known node type used as the event. "
             f"Rule format: FROM_TYPE --event--> TO_TYPE")
+    findings_extra = []
+    for t in (frm, to):
+        if t != "any" and t not in nodetypes:
+            declare_nodetype(board_dir, t)
+            findings_extra.append(("info",
+                f"auto-declared node type '{t}' with placeholder contract - "
+                f"fill in the real contract in nodetypes.yaml"))
     rule = {"from": frm, "on": on, "to": to, "activate": activate}
     if budget:
         rule["budget"] = int(budget)
     candidate = dict(data)
     candidate["transitions"] = list(data.get("transitions") or []) + [rule]
     parsed = parse_data(candidate)
-    findings = check(parsed, nodetypes)
-    errors = [f for f in findings if f[0] == "error"]
+    findings = findings_extra + check(parsed, load_nodetypes(Path(board_dir) / "nodetypes.yaml"))
+    errors = [m for lvl, m in findings if lvl == "error"]
+    if force:
+        errors = [m for m in errors if "no root" not in m]
+        findings = [(("warning" if lvl == "error" and "no root" in msg else lvl), msg)
+                    for lvl, msg in findings]
     if errors:
-        raise GrammarError("rule rejected by grammar-check: " +
-                           "; ".join(msg for _, msg in errors))
+        msg = "rule rejected by grammar-check: " + "; ".join(errors)
+        if any("no root" in e for e in errors):
+            msg += (" | fixes: add an entry rule first (e.g. goal --done--> "
+                    "<one of your types>), or re-run with force=true to accept "
+                    "a closed cycle (it can then only be seeded via propose)")
+        raise GrammarError(msg)
     path.write_text(yaml.safe_dump(candidate, sort_keys=False, allow_unicode=True),
                     encoding="utf-8")
     return findings
