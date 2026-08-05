@@ -354,6 +354,10 @@ def propose(conn, type, spec, parent=None, on=None):
         "INSERT INTO nodes(id, type, state, parent, on_event, owner, spec, "
         "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
         (nid, type, "proposed", parent, on, None, spec, ts, ts))
+    if parent is not None:
+        conn.execute(
+            "INSERT INTO edges(from_id, on_event, to_id) VALUES(?,?,?)",
+            (parent, on or "proposed", nid))
     _event(conn, "propose", "", nid, f"type={type}")
     conn.commit()
     return nid

@@ -238,6 +238,14 @@ def test_pull_creates_workdir(conn):
     assert Path(workdir).is_dir()
 
 
+def test_propose_with_parent_records_edge(conn):
+    parent = core.propose(conn, "plan", "p")
+    child = core.propose(conn, "task", "c", parent=parent)
+    edge = conn.execute("SELECT from_id, on_event, to_id FROM edges").fetchone()
+    assert (edge["from_id"], edge["on_event"], edge["to_id"]) == \
+           (parent, "proposed", child)
+
+
 def test_split_lifecycle_and_reactivation(conn):
     plan = core.propose(conn, "plan", "big task")
     core.approve(conn, plan)
