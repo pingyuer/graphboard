@@ -3,11 +3,22 @@ import re
 from pathlib import Path
 
 from .core import GbError
-from .grammar import declare_nodetype
+from .grammar import declare_nodetype, load_nodetypes
 
 
-def render_role(name, description, claims, duties, loading, outputs, done_when):
+def render_role(name, description, claims, duties, loading, outputs, done_when,
+                background="", contracts=None):
     claims_line = ", ".join(claims) if isinstance(claims, (list, tuple)) else claims
+    bg = ""
+    if background and background.strip():
+        bg = ("Background (the project you serve - you carry this for your whole "
+              "session; it is not re-injected):\n"
+              + background.strip() + "\n\n")
+    ct = ""
+    if contracts:
+        ct = ("Contracts of your node types:\n"
+              + "\n".join(f"  - {t}: {c}" for t, c in contracts.items())
+              + "\n\n")
     return f"""---
 description: {description}
 mode: primary
@@ -15,9 +26,9 @@ mode: primary
 
 You are the {name} role.
 
-Claims: nodes of type {claims_line}.
+{bg}Claims: nodes of type {claims_line}.
 
-Duties:
+{ct}Duties:
 {duties.strip()}
 
 Loading:
@@ -29,6 +40,25 @@ Outputs:
 Done when:
 {done_when.strip()}
 """
+
+
+def collect_role_context(board_dir, claims):
+    board_dir = Path(os.path.expanduser(str(board_dir)))
+    background = ""
+    cpath = board_dir / "charter.md"
+    if cpath.exists():
+        background = cpath.read_text(encoding="utf-8").strip()
+    contracts = {}
+    nodetypes = load_nodetypes(board_dir / "nodetypes.yaml")
+    for t in claims:
+        spec = nodetypes.get(t)
+        if isinstance(spec, dict):
+            c = str(spec.get("contract", "")).strip()
+        else:
+            c = str(spec or "").strip()
+        if c and not c.startswith("TODO"):
+            contracts[t] = c
+    return background, contracts
 
 
 def write_role(repo, name, content, force=False):

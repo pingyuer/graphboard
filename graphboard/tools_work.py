@@ -4,19 +4,28 @@ from . import core, doctor, render
 def register(server, infra):
     guard = infra.guard
 
-    @server.tool(description="Claim the next pending node and get what you need to start. "
-                             "owner: your role-instance name (e.g. impl-a).")
+    @server.tool(description="Claim the next pending node. Thin injection: you get the card face - "
+                             "summary, anchor, inputs paths, and fresh messages/announcements. "
+                             "Your role file already carries the project background; fetch the full "
+                             "spec/outputs on demand via gb_status. Wrong node? gb_release it back.")
     def gb_pull(owner: str, type: str = "") -> str:
         def run(conn):
-            grammar, contracts = infra.grammar_and_contracts()
-            result = core.pull(conn, owner, type_filter=type or None,
-                               contracts=contracts)
+            result = core.pull(conn, owner, type_filter=type or None)
             if result.get("claimed"):
                 baseline = infra.baseline_str()
                 if baseline:
                     result["claimed"]["baseline"] = baseline
             return render.render_pull(result)
         return guard("gb_pull", {"owner": owner, "type": type}, run)
+
+    @server.tool(description="Release a node you claimed back to pending (mis-pull, dependency not "
+                             "ready, context lost). Owner only; the anchor note is preserved for the "
+                             "next claimer. Claiming is meant to be light - so is putting a card back.")
+    def gb_release(id: str, owner: str, reason: str = "") -> str:
+        def run(conn):
+            core.unclaim(conn, id, owner=owner, reason=reason)
+            return render.render_release(id)
+        return guard("gb_release", {"id": id, "owner": owner, "reason": reason}, run)
 
     @server.tool(description="Finish the active node, or harvest a running one. status: done|blocked; "
                              "event overrides the grammar event (default: status). outputs: PATH[:NOTE];PATH. "
@@ -73,16 +82,21 @@ def register(server, infra):
             return render.render_split(result)
         return guard("gb_split", {"id": id, "owner": owner, "children": children}, run)
 
-    @server.tool(description="Propose a new node (needs approval unless a grammar rule says otherwise).")
-    def gb_propose(type: str, spec: str, parent: str = "") -> str:
+    @server.tool(description="Propose a new node (needs approval unless a grammar rule says otherwise). "
+                             "summary: one short line for board views and pull injection (falls back to "
+                             "the spec's first line) - the spec itself holds the full detail.")
+    def gb_propose(type: str, spec: str, parent: str = "", summary: str = "") -> str:
         def run(conn):
-            nid = core.propose(conn, type, spec, parent=parent or None)
+            nid = core.propose(conn, type, spec, parent=parent or None,
+                               summary=summary or None)
             return render.render_propose(nid)
-        return guard("gb_propose", {"type": type, "spec": spec, "parent": parent}, run)
+        return guard("gb_propose", {"type": type, "spec": spec, "parent": parent,
+                                    "summary": summary}, run)
 
-    @server.tool(description="Board overview (no id) or one node's lineage, children, outputs, messages "
-                             "(with id). Re-orient here after a session restart or context compaction: "
-                             "pass your owner name to see your own active/running nodes first.")
+    @server.tool(description="The on-demand context tool. With id: one node's FULL spec, summary, lineage, "
+                             "children, outputs, messages - pull only injects the summary, come here for "
+                             "the rest. Without id: board overview; pass your owner name to see your own "
+                             "active/running nodes first after a session restart or context compaction.")
     def gb_status(id: str = "", owner: str = "") -> str:
         def run(conn):
             result = core.status(conn, id or None, owner=owner or None)

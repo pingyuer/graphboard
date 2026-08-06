@@ -210,9 +210,12 @@ def test_machine_migration_incident_scenario(tmp_path, capsys):
     run(board, "propose", "--type", "design", "--spec", "design the re-eval")
     d1 = node_by_type(board, "design", "proposed")
     run(board, "approve", d1)
-    run(board, "pull", "--owner", "design-a")
     capsys.readouterr()
     run(board, "pull", "--owner", "design-a")
+    assert "summary: design the re-eval" in capsys.readouterr().out
+    # facts are query-only: visible via fact list, not injected at pull
+    capsys.readouterr()
+    run(board, "fact", "list")
     assert "gpu-ports: 31431/31531" in capsys.readouterr().out
     capsys.readouterr()
     run(board, "submit", d1, "--owner", "design-a", "--status", "done",
@@ -256,12 +259,16 @@ def test_machine_migration_incident_scenario(tmp_path, capsys):
     run(board, "pull", "--owner", "exp-b")
     out = capsys.readouterr().out
     assert f"claimed: {e1}" in out
-    assert "gpu-ports: 32217/30318" in out
+    assert "summary: re-eval 22 ckpts" in out
     assert "machine migrated" in out
     assert "resume from MLflow" in out
     # delegate's note ("how to check") is the surviving anchor across
     # submit -> reopen -> re-pull
     assert "anchor: tmux wp3_reeval @31431" in out
+    # updated environment facts are query-only, delivered on demand
+    capsys.readouterr()
+    run(board, "fact", "list")
+    assert "gpu-ports: 32217/30318" in capsys.readouterr().out
 
     # writeup node meanwhile: conductor re-prioritizes it behind the resume
     run(board, "priority", e2_declared, "5",
@@ -309,3 +316,31 @@ def propose_followup(board, parent, spec):
 
 def run_or_propose_followup(board, parent):
     return propose_followup(board, parent, "stale follow-up draft")
+
+
+def test_charter_baked_into_generated_role(tmp_path, capsys):
+    board = init_proj(tmp_path, "chartered", "rd-classic")
+    repo = str(tmp_path / "chartered")
+    run(board, "charter", "Reproduce paper X: half-supervised segmentation.")
+    capsys.readouterr()
+    run(board, "charter")
+    assert "Reproduce paper X" in capsys.readouterr().out
+    assert cli.main(["--board", board, "role", "new", "runner",
+                     "--repo", repo,
+                     "--desc", "Runs the experiments.",
+                     "--claims", "implementation"]) == 0
+    content = (tmp_path / "chartered" / ".opencode" / "agents"
+               / "runner.md").read_text()
+    assert "Background" in content
+    assert "Reproduce paper X" in content
+    assert "Contracts of your node types" in content
+
+    # summary repair channel via CLI
+    run(board, "propose", "--type", "proposal",
+        "--spec", "overly verbose spec that rambles on and on")
+    nid = node_by_type(board, "proposal", "proposed")
+    run(board, "summary", nid, "--text", "tight card face")
+    conn = db.connect(f"{board}/graph.db")
+    assert conn.execute("SELECT summary FROM nodes WHERE id=?",
+                        (nid,)).fetchone()[0] == "tight card face"
+    conn.close()

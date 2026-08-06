@@ -80,7 +80,8 @@ def register(server, infra):
                                      "audience": audience}, run)
 
     @server.tool(description="GOVERNANCE (gb conductor only). Project facts store: small volatile truths "
-                             "(server ports, URIs, machine lists) injected at every gb_pull. action: "
+                             "(server ports, URIs, machine lists). NOT injected at pull - workers query "
+                             "when needed; broadcast critical changes via gba_announce. action: "
                              "set|remove|list. Static context belongs in init artifacts, not facts.")
     def gba_fact(action: str = "list", key: str = "", value: str = "") -> str:
         def run(conn):
@@ -95,6 +96,29 @@ def register(server, infra):
             raise core.GbError(f"action must be set|remove|list, got {action!r}")
         return guard("gba_fact", {"action": action, "key": key,
                                   "value": value}, run)
+
+    @server.tool(description="GOVERNANCE (gb conductor only). Project charter: what this project is about "
+                             "and why. Written to .board/charter.md and baked into every role file at "
+                             "generation (one-time background injection). action: show|set.")
+    def gba_charter(action: str = "show", text: str = "") -> str:
+        def run(conn):
+            if action == "show":
+                charter = core.charter_get(conn)
+                return charter or render.render_charter("empty")
+            if action == "set":
+                core.charter_set(conn, text, by="conductor")
+                return render.render_charter("set")
+            raise core.GbError(f"action must be show|set, got {action!r}")
+        return guard("gba_charter", {"action": action, "text": text}, run)
+
+    @server.tool(description="GOVERNANCE (gb conductor only). Repair a node's summary: the one short line "
+                             "shown in board views and pull injection. Keep it under ~120 chars; full "
+                             "detail belongs in the spec / a design doc.")
+    def gba_summary(id: str, text: str) -> str:
+        def run(conn):
+            core.set_summary(conn, id, text)
+            return render.render_summary(id)
+        return guard("gba_summary", {"id": id, "text": text}, run)
 
     @server.tool(description="GOVERNANCE (gb conductor only). Reopen a terminal node (done|rejected|"
                              "canceled) back to pending when the world changed after it was closed "
@@ -149,10 +173,12 @@ def register(server, infra):
     @server.tool(description="GOVERNANCE (gb conductor only). Register or update a role after the human "
                              "confirmed the draft. action: register (new role) | update (full re-render of "
                              "an existing role - provide ALL slots again). claims: comma-separated node types. "
+                             "background defaults to the board charter; the charter and the claimed types' "
+                             "contracts are baked into the role file (one-time background injection). "
                              "Ensures node types exist and suggests grammar rules (never writes the grammar).")
     def gba_role(name: str, description: str, claims: str, duties: str = "",
                  loading: str = "", outputs: str = "", done_when: str = "",
-                 action: str = "register") -> str:
+                 action: str = "register", background: str = "") -> str:
         def run():
             repo = infra.repo()
             board_dir = infra.project_paths()
@@ -161,13 +187,16 @@ def register(server, infra):
                 raise core.GbError("claims must list at least one node type")
             if action not in ("register", "update"):
                 raise core.GbError(f"action must be register|update, got {action!r}")
+            charter, contracts = roles.collect_role_context(board_dir, claim_list)
             content = roles.render_role(
                 name=name, description=description, claims=claim_list,
                 duties=duties or "Work the claimed node according to its spec and contract.",
                 loading=loading or "Start from the node's inputs; use gb_query for anything else needed.",
                 outputs=outputs or "Code artifacts stay in the repo (commit your own files with explicit "
                                    "pathspec before submit); coordination artifacts go to the workdir.",
-                done_when=done_when or "The node spec's completion criteria are met and outputs are submitted.")
+                done_when=done_when or "The node spec's completion criteria are met and outputs are submitted.",
+                background=(background or "").strip() or charter,
+                contracts=contracts)
             path = roles.write_role(repo, name, content, force=(action == "update"))
             added = roles.ensure_nodetypes(board_dir, claim_list, description)
             lines = [f"role {'updated' if action == 'update' else 'registered'}: {path}"]

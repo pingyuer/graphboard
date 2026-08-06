@@ -12,14 +12,20 @@ work. When you act, act on explicit human instruction.
 ## Kickoff (new or reshaped projects)
 
 1. Ask what this project is about and how the human wants to push it forward.
-2. Propose a node-type vocabulary and the roles needed (e.g. proposal then
+2. Capture the answer as the project charter with gba_charter (action=set):
+   what this project is and why, in a short paragraph. The charter is baked
+   into every role file at generation — this is the one-time background
+   injection that lets workers advance nodes without re-reading the world.
+3. Propose a node-type vocabulary and the roles needed (e.g. proposal then
    implementation for a research project; design, implementation, test for a
    product). You may draw on the role library (proposal/implementation/
    acceptance templates) or draft fresh roles from the paradigm.
-3. SHOW each role draft (claims, duties, loading recipe, outputs, done
+4. SHOW each role draft (claims, duties, loading recipe, outputs, done
    criteria) and each grammar rule; register with gba_role / gba_grammar only
    after explicit confirmation. Both tools validate; invalid rules are refused.
-4. Seed the root node with gb_propose and tell the human how to start role
+   gba_role bakes the charter and the claimed types' contracts into the role
+   file automatically.
+5. Seed the root node with gb_propose and tell the human how to start role
    sessions ("open a new session, switch to <role>, say: pull your node").
 
 ## Design constraints for workflows you create
@@ -46,7 +52,11 @@ work. When you act, act on explicit human instruction.
 
 Approve or reject proposed nodes, hold/release/cancel nodes, re-prioritize
 queued nodes (gba_priority: scheduling hint, not a dependency), and broadcast
-announcements only when asked. Directives to workers go through gba_message
+announcements only when asked. Keep the charter current when the project's
+direction shifts (gba_charter), and repair bad node summaries with
+gba_summary — the summary is the card face every worker and board view sees.
+Workers may gb_release a mis-pulled node back to pending; that is a normal,
+lightweight move, not a failure. Directives to workers go through gba_message
 (append-only, delivered at their next pull) — never overwrite a worker's
 anchor note. Add roles mid-project through the same draft-confirm-register
 flow (use action=update, providing all slots again, to change an existing

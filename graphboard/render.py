@@ -38,7 +38,6 @@ def render_pull(result):
         if result.get("awaiting_approval"):
             lines.append(f"note: {result['awaiting_approval']} proposed node(s) await "
                          f"human approval - wait or ask, do not start working")
-        lines.extend(_facts_lines(result.get("facts")))
         if result.get("announcements"):
             lines.append("announcements:")
             for a in result["announcements"]:
@@ -48,7 +47,8 @@ def render_pull(result):
     lines = [
         f"claimed: {c['id']}{_prio(c.get('priority'))}",
         f"type: {c['type']}",
-        f"spec: {c['spec']}",
+        f"summary: {c.get('summary') or _first_line(c.get('spec', ''), 120)}",
+        f"full: gb_status id={c['id']} (spec, lineage, outputs, messages)",
     ]
     if c.get("note"):
         lines.append(f"anchor: {c['note']}")
@@ -63,11 +63,7 @@ def render_pull(result):
         for i in result["inputs"]:
             suffix = f"  ({i['note']})" if i.get("note") else ""
             lines.append(f"  - {i['path']}{suffix}")
-    if result.get("contract"):
-        lines.append("contract:")
-        lines.extend("  " + l for l in result["contract"].strip().splitlines())
     lines.extend(_messages_lines(result.get("messages")))
-    lines.extend(_facts_lines(result.get("facts")))
     if result.get("announcements"):
         lines.append("announcements:")
         for a in result["announcements"]:
@@ -113,8 +109,10 @@ def render_status(result):
             f"type: {n['type']}",
             f"state: {n['state']}" + (" (archived)" if n.get("archived") else ""),
             f"owner: {n['owner'] or '-'}",
-            f"spec: {n['spec']}",
         ]
+        if n.get("summary"):
+            lines.append(f"summary: {n['summary']}")
+        lines.append(f"spec: {n['spec']}")
         if n.get("note"):
             lines.append(f"anchor: {n['note']}")
         if n.get("resources"):
@@ -144,7 +142,8 @@ def render_status(result):
         for n in result["yours"]:
             res = f" res={n['resources']}" if n.get("resources") else ""
             check = f" check_after={n['check_after']}" if n.get("check_after") else ""
-            lines.append(f"  - {n['id']} ({n['type']}, {n['state']}){res}{check}")
+            lines.append(f"  - {n['id']} ({n['type']}, {n['state']}){res}{check} "
+                         f"{n.get('summary') or ''}".rstrip())
             if n.get("note"):
                 lines.append(f"    anchor: {n['note']}")
     if result.get("open"):
@@ -152,13 +151,13 @@ def render_status(result):
         for n in result["open"][:OVERVIEW_BUDGET - 2]:
             owner = f" [{n['owner']}]" if n.get("owner") else ""
             res = f" res={n['resources']}" if n.get("resources") else ""
+            mail = f" ✉{n['msg_count']}" if n.get("msg_count") else ""
             lines.append(f"  - {n['id']} ({n['type']}, {n['state']})"
-                         f"{owner}{_prio(n.get('priority'))}{res} "
-                         f"{_first_line(n['spec'], 60)}")
+                         f"{owner}{_prio(n.get('priority'))}{res}{mail} "
+                         f"{n.get('summary') or _first_line(n.get('spec',''), 60)}")
         extra = len(result["open"]) - (OVERVIEW_BUDGET - 2)
         if extra > 0:
             lines.append(f"  ... {extra} more")
-    lines.extend(_facts_lines(result.get("facts")))
     return "\n".join(lines)
 
 
@@ -169,9 +168,10 @@ def render_query(result):
     for n in result["nodes"]:
         owner = f" [{n['owner']}]" if n.get("owner") else ""
         arch = " (archived)" if n.get("archived") else ""
+        mail = f" ✉{n['msg_count']}" if n.get("msg_count") else ""
         lines.append(f"{n['id']} ({n['type']}, {n['state']}){owner}"
-                     f"{_prio(n.get('priority'))}{arch} "
-                     f"{_first_line(n['spec'], 60)}")
+                     f"{_prio(n.get('priority'))}{arch}{mail} "
+                     f"{n.get('summary') or _first_line(n.get('spec',''), 60)}")
         if n.get("resources"):
             check = f" check_after={n['check_after']}" if n.get("check_after") else ""
             lines.append(f"  resources: {n['resources']}{check}")
@@ -249,6 +249,16 @@ def render_facts(rows):
     return "\n".join(f"{f['key']}: {f['value']}  "
                      f"(by {f['updated_by']}, {f['updated_at'][:10]})"
                      for f in rows)
+
+
+def render_summary(node_id):
+    return f"summary updated: {node_id}"
+
+
+def render_charter(action):
+    if action == "set":
+        return "charter updated (.board/charter.md) - baked into roles at generation"
+    return "charter is empty; set it so new roles inherit the project background"
 
 
 def render_reopen(node_id, prev_state):

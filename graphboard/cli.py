@@ -111,8 +111,27 @@ def cmd_query(args):
 def cmd_propose(args):
     conn, _, _ = open_board(args)
     nid = core.propose(conn, args.type, args.spec, parent=args.parent,
-                       on=args.on, priority=args.priority)
+                       on=args.on, priority=args.priority,
+                       summary=args.summary)
     print(render.render_propose(nid))
+    return 0
+
+
+def cmd_summary(args):
+    conn, _, _ = open_board(args)
+    core.set_summary(conn, args.id, args.text)
+    print(render.render_summary(args.id))
+    return 0
+
+
+def cmd_charter(args):
+    conn, _, _ = open_board(args)
+    if args.text:
+        core.charter_set(conn, args.text, by="human")
+        print(render.render_charter("set"))
+        return 0
+    charter = core.charter_get(conn)
+    print(charter or render.render_charter("empty"))
     return 0
 
 
@@ -174,9 +193,8 @@ def cmd_supersede(args):
 
 
 def cmd_pull(args):
-    conn, _, contracts = open_board(args)
-    result = core.pull(conn, args.owner, type_filter=args.type,
-                       contracts=contracts)
+    conn, _, _ = open_board(args)
+    result = core.pull(conn, args.owner, type_filter=args.type)
     if result.get("claimed"):
         baseline = git_baseline(resolve_board(args).parent)
         if baseline:
@@ -316,13 +334,20 @@ def cmd_grammar_remove(args):
 def cmd_role_new(args):
     repo = Path(os.path.expanduser(args.repo))
     claims = [c.strip() for c in args.claims.split(",") if c.strip()]
+    background, contracts = "", {}
+    try:
+        board = resolve_board(args)
+        background, contracts = roles.collect_role_context(board, claims or ["task"])
+    except UsageError:
+        pass
     content = roles.render_role(
         name=args.name, description=args.desc, claims=claims or ["task"],
         duties=args.duties or "Work the claimed node according to its spec and contract.",
         loading=args.loading or "Start from the node's inputs; use gb_query for anything else needed.",
         outputs=args.outputs or "Code artifacts stay in the repo (commit your own files with explicit "
                                 "pathspec before submit); coordination artifacts go to the workdir.",
-        done_when=args.done_when or "The node spec's completion criteria are met and outputs are submitted.")
+        done_when=args.done_when or "The node spec's completion criteria are met and outputs are submitted.",
+        background=args.background or background, contracts=contracts)
     path = roles.write_role(repo, args.name, content, force=args.force)
     print(f"wrote role: {path}")
     if claims:
@@ -462,7 +487,21 @@ def build_parser():
     p.add_argument("--on")
     p.add_argument("--priority", type=int, default=None,
                    help="1-9, lower is served first (default 3)")
+    p.add_argument("--summary",
+                   help="one short line for board views/pull (default: spec's "
+                        "first line)")
     p.set_defaults(fn=cmd_propose)
+
+    p = sub.add_parser("summary", help="repair a node's summary (one short line "
+                                       "for board views/pull)")
+    p.add_argument("id")
+    p.add_argument("--text", required=True)
+    p.set_defaults(fn=cmd_summary)
+
+    p = sub.add_parser("charter", help="project background baked into role files "
+                                       "at generation (show, or pass text to set)")
+    p.add_argument("text", nargs="?")
+    p.set_defaults(fn=cmd_charter)
 
     p = sub.add_parser("priority", help="re-prioritize a proposed|pending|blocked "
                                         "node (scheduling hint, not a dependency)")
@@ -627,6 +666,8 @@ def build_parser():
     pr.add_argument("--loading")
     pr.add_argument("--outputs")
     pr.add_argument("--done-when", dest="done_when")
+    pr.add_argument("--background", default="",
+                    help="project background (default: the board charter)")
     pr.add_argument("--force", action="store_true")
     pr.set_defaults(fn=cmd_role_new)
     pr = role_sub.add_parser("list", help="list roles in a repo")

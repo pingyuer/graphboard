@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS nodes(
   on_event TEXT,
   owner TEXT,
   spec TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
   note TEXT,
   resources TEXT,
   check_after TEXT,
@@ -119,7 +120,8 @@ def _migrate(conn):
     if cols and not {"resources", "check_after"} <= cols:
         conn.executescript(_NODES_REBUILD)
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(nodes)")}
-    for col, decl in (("priority", "INTEGER NOT NULL DEFAULT 3"),
+    for col, decl in (("summary", "TEXT NOT NULL DEFAULT ''"),
+                      ("priority", "INTEGER NOT NULL DEFAULT 3"),
                       ("archived", "INTEGER NOT NULL DEFAULT 0"),
                       ("superseded_by", "TEXT")):
         if cols and col not in cols:

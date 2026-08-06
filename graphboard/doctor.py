@@ -131,6 +131,14 @@ def run_checks(conn, board, grammar, stale_hours=24.0, orphan_hours=4.0):
         issues.append(f"{expired_ann} expired announcement(s) still active - "
                       f"clear with announce --clear")
 
+    stale_ann = conn.execute(
+        "SELECT COUNT(*) c FROM announcements WHERE active=1 AND "
+        "expires_at IS NULL AND "
+        "created_at < strftime('%Y-%m-%dT%H:%M:%S','now','-7 days')").fetchone()["c"]
+    if stale_ann:
+        issues.append(f"{stale_ann} announcement(s) active >7 days without TTL - "
+                      f"still injected at every pull; clear or add a TTL")
+
     fact_chars = conn.execute(
         "SELECT COALESCE(SUM(LENGTH(key) + LENGTH(value)), 0) c FROM facts"
     ).fetchone()["c"]

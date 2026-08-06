@@ -39,7 +39,8 @@ def test_mcp_full_chain(env):
     call(server, "gba_approve", {"id": nid})
     text = call(server, "gb_pull", {"owner": "p"})
     assert f"claimed: {nid}" in text
-    assert "contract:" in text
+    assert "summary: mcp smoke" in text
+    assert "full: gb_status" in text
     assert "workdir:" in text
 
     text = call(server, "gb_note", {"id": nid, "text": "drafting", "owner": "p"})
@@ -298,11 +299,12 @@ def test_mcp_tool_surface(env):
     tools = asyncio.run(server.list_tools())
     names = sorted(t.name for t in tools)
     assert names == sorted([
-        "gb_pull", "gb_submit", "gb_split", "gb_delegate", "gb_reactivate",
-        "gb_propose", "gb_status", "gb_query", "gb_note", "gb_doctor",
+        "gb_pull", "gb_release", "gb_submit", "gb_split", "gb_delegate",
+        "gb_reactivate", "gb_propose", "gb_status", "gb_query", "gb_note",
+        "gb_doctor",
         "gba_approve", "gba_release", "gba_cancel", "gba_hold", "gba_announce",
-        "gba_priority", "gba_message", "gba_fact", "gba_reopen", "gba_archive",
-        "gba_restore", "gba_supersede",
+        "gba_priority", "gba_message", "gba_fact", "gba_charter", "gba_summary",
+        "gba_reopen", "gba_archive", "gba_restore", "gba_supersede",
         "gba_bootstrap", "gba_role", "gba_grammar", "gba_export"])
 
 
@@ -351,7 +353,7 @@ def test_mcp_message_and_note_guard(env):
     assert "directive for impl" in text and "for reviewers only" in text
 
 
-def test_mcp_facts_injected_at_pull(env):
+def test_mcp_facts_query_only(env):
     server, _, _ = env
     call(server, "gba_fact", {"action": "set", "key": "gpu-ports",
                               "value": "32217/30318"})
@@ -359,7 +361,8 @@ def test_mcp_facts_injected_at_pull(env):
     assert "gpu-ports: 32217/30318" in text
     nid = _claim(server)
     text = call(server, "gb_pull", {"owner": "w"})
-    assert f"claimed: {nid}" in text and "gpu-ports: 32217/30318" in text
+    # facts are no longer injected at pull; workers query them on demand
+    assert f"claimed: {nid}" in text and "gpu-ports" not in text
     call(server, "gba_fact", {"action": "remove", "key": "gpu-ports"})
     text = call(server, "gba_fact", {"action": "list"})
     assert "no facts" in text
@@ -433,3 +436,48 @@ def test_mcp_missing_board_env(tmp_path, monkeypatch):
     srv._cache.clear()
     text = call(srv.server, "gb_status", {})
     assert "GB_BOARD" in text or "GB_PROJECT" in text
+
+
+def test_mcp_summary_flow(env):
+    server, _, _ = env
+    out = call(server, "gb_propose",
+               {"type": "proposal", "spec": "long spec body\nsecond line",
+                "summary": "short card face"})
+    nid = out.split()[1]
+    call(server, "gba_approve", {"id": nid})
+    text = call(server, "gb_pull", {"owner": "p"})
+    assert f"claimed: {nid}" in text and "summary: short card face" in text
+    assert "long spec body" not in text
+    call(server, "gb_release", {"id": nid, "owner": "p"})
+    text = call(server, "gb_status", {"id": nid})
+    assert "long spec body" in text and "summary: short card face" in text
+    call(server, "gba_summary", {"id": nid, "text": "repaired face"})
+    text = call(server, "gb_status", {"id": nid})
+    assert "summary: repaired face" in text
+
+
+def test_mcp_self_release_guards(env):
+    server, _, _ = env
+    nid = _claim(server)
+    call(server, "gb_pull", {"owner": "w-a"})
+    text = call(server, "gb_release", {"id": nid, "owner": "intruder"})
+    assert text.startswith("error:")
+    text = call(server, "gb_release", {"id": nid, "owner": "w-a",
+                                       "reason": "mis-pull"})
+    assert "released" in text
+    text = call(server, "gb_status", {"id": nid})
+    assert "pending" in text
+
+
+def test_mcp_charter_baked_into_role(env):
+    server, board, repo = env
+    call(server, "gba_charter", {"action": "set",
+                                 "text": "Reproduce paper X on ACDC."})
+    text = call(server, "gba_charter", {"action": "show"})
+    assert "Reproduce paper X" in text
+    call(server, "gba_role", {
+        "name": "runner", "description": "Runs experiments.",
+        "claims": "implementation"})
+    content = (repo / ".opencode" / "agents" / "runner.md").read_text()
+    assert "Background" in content
+    assert "Reproduce paper X on ACDC." in content

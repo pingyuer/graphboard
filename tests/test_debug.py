@@ -257,3 +257,16 @@ def test_server_log_disabled(tmp_path, monkeypatch):
     srv._cache.clear()
     asyncio.run(srv.server.call_tool("gb_status", {}))
     assert not (proj / ".board" / "server.log").exists()
+
+
+def test_cli_doctor_flags_stale_announcement(board, capsys):
+    conn = db.connect(board / "graph.db")
+    conn.execute(
+        "INSERT INTO announcements(text, active, expires_at, created_at) "
+        "VALUES('old news', 1, NULL, '2020-01-01T00:00:00.000Z')")
+    conn.commit()
+    conn.close()
+    capsys.readouterr()
+    code = cli.main(["--board", str(board), "doctor"])
+    out = capsys.readouterr().out
+    assert code == 1 and "without TTL" in out

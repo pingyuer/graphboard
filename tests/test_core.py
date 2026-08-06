@@ -57,7 +57,7 @@ def test_pull_claim_race_exactly_one_winner(tmp_path):
     assert all(r["counts"]["active"] == 1 for r in losers)
 
 
-def test_pull_returns_inputs_contract_announcements(conn, grammar):
+def test_pull_returns_inputs_summary_announcements(conn, grammar):
     parent = seed_pending(conn, "proposal", "write it")
     core.pull(conn, owner="p1")
     core.submit(conn, parent, owner="p1", status="done",
@@ -68,11 +68,13 @@ def test_pull_returns_inputs_contract_announcements(conn, grammar):
         "SELECT id FROM nodes WHERE state='proposed'").fetchone()["id"]
     core.approve(conn, child)
     core.announce(conn, "always log seeds")
-    contracts = {"implementation": {"contract": "follow the proposal"}}
-    r = core.pull(conn, owner="i1", contracts=contracts)
+    r = core.pull(conn, owner="i1")
     assert r["claimed"]["type"] == "implementation"
+    assert r["claimed"]["summary"] == "build it"
+    # thin injection: no full spec, no contract, no facts dump
+    assert "spec" not in r["claimed"]
+    assert "contract" not in r and "facts" not in r
     assert r["inputs"][0]["path"] == "out/proposal.md"
-    assert r["contract"] == "follow the proposal"
     assert r["announcements"][0]["text"] == "always log seeds"
     r2 = core.pull(conn, owner="i1")
     assert r2["claimed"] is None
@@ -458,7 +460,7 @@ def test_batch_successors_pulled_in_declaration_order(conn):
     specs = []
     for i in ("w1", "w2", "w3"):
         r = core.pull(conn, owner=i)
-        specs.append(r["claimed"]["spec"])
+        specs.append(r["claimed"]["summary"])
     assert specs == ["first", "second", "third"]
 
 
@@ -771,7 +773,7 @@ def test_note_owner_enforced(conn):
                         (nid,)).fetchone()[0] == "human override"
 
 
-def test_facts_set_list_remove_and_injection(conn):
+def test_facts_set_list_remove_query_only(conn):
     core.fact_set(conn, "gpu-servers", "32217/30318", by="gb")
     core.fact_set(conn, "mlflow", "http://172.16.240.77:5000", by="gb")
     rows = core.facts(conn)
@@ -785,7 +787,9 @@ def test_facts_set_list_remove_and_injection(conn):
     nid = core.propose(conn, "task", "s")
     core.approve(conn, nid)
     r = core.pull(conn, owner="w")
-    assert any(f["key"] == "gpu-servers" for f in r["facts"])
+    # facts are query-only now; they are NOT injected at pull
+    assert "facts" not in r
+    assert any(f["key"] == "gpu-servers" for f in core.facts(conn))
     core.fact_remove(conn, "mlflow", by="gb")
     with pytest.raises(core.GbError):
         core.fact_remove(conn, "nope")
@@ -802,7 +806,7 @@ def test_status_owner_self_view(conn):
     assert s["yours"][0]["state"] == "running"
     s2 = core.status(conn, owner="nobody")
     assert s2["yours"] == []
-    assert "facts" in s and "counts" in s
+    assert "counts" in s and "yours" in s and "open" in s
 
 
 # --- repair plane: reopen, archive/restore, supersede ---
@@ -912,3 +916,86 @@ def test_supersede_validation(conn):
     core.approve(conn, other)
     r = core.supersede(conn, other, pending_new)
     assert r["approved"] is False
+
+
+# --- node as a first-class citizen: summary, charter, self-release, lossless audit ---
+
+def test_summary_explicit_and_fallback(conn):
+    nid = core.propose(conn, "task", "line one\nline two", summary="hand written")
+    assert conn.execute("SELECT summary FROM nodes WHERE id=?",
+                        (nid,)).fetchone()[0] == "hand written"
+    auto = core.propose(conn, "task", "first line is the summary\nrest")
+    assert conn.execute("SELECT summary FROM nodes WHERE id=?",
+                        (auto,)).fetchone()[0] == "first line is the summary"
+    long_spec = "x" * 400
+    trunc = core.propose(conn, "task", long_spec)
+    summ = conn.execute("SELECT summary FROM nodes WHERE id=?",
+                        (trunc,)).fetchone()[0]
+    assert summ.endswith("…") and len(summ) <= core.SUMMARY_MAX + 1
+
+
+def test_summary_of_successors_and_split(conn):
+    plan = core.propose(conn, "plan", "p")
+    core.approve(conn, plan)
+    core.pull(conn, owner="arch")
+    r = core.submit(conn, plan, owner="arch", status="done",
+                    outputs=[{"path": "o"}],
+                    successors=[{"type": "task", "spec": "child summary\nbody"}])
+    kid = r["successors"][0]["id"]
+    assert conn.execute("SELECT summary FROM nodes WHERE id=?",
+                        (kid,)).fetchone()[0] == "child summary"
+
+
+def test_set_summary_validation(conn):
+    nid = core.propose(conn, "task", "s")
+    core.set_summary(conn, nid, "repaired")
+    assert conn.execute("SELECT summary FROM nodes WHERE id=?",
+                        (nid,)).fetchone()[0] == "repaired"
+    with pytest.raises(core.GbError):
+        core.set_summary(conn, nid, "   ")
+    with pytest.raises(core.GbError):
+        core.set_summary(conn, nid, "y" * (core.SUMMARY_MAX * 2 + 10))
+
+
+def test_charter_roundtrip(conn):
+    assert core.charter_get(conn) == ""
+    core.charter_set(conn, "We reproduce paper X.\nFocus: Tab.1.")
+    assert core.charter_get(conn) == "We reproduce paper X.\nFocus: Tab.1."
+    with pytest.raises(core.GbError):
+        core.charter_set(conn, "   ")
+
+
+def test_unclaim_self_release(conn):
+    nid = core.propose(conn, "task", "s")
+    core.approve(conn, nid)
+    core.pull(conn, owner="w-a")
+    core.note(conn, nid, "my anchor", owner="w-a")
+    core.unclaim(conn, nid, owner="w-a", reason="dependency not ready")
+    row = conn.execute("SELECT * FROM nodes WHERE id=?", (nid,)).fetchone()
+    assert row["state"] == "pending" and row["owner"] is None
+    assert row["note"] == "my anchor"
+    with pytest.raises(core.GbError):
+        core.unclaim(conn, nid, owner="w-a")
+    core.pull(conn, owner="w-b")
+    with pytest.raises(core.GbError):
+        core.unclaim(conn, nid, owner="w-a")
+
+
+def test_audit_detail_lossless(conn):
+    long_text = "z" * 500
+    nid = core.propose(conn, "task", "s")
+    core.approve(conn, nid)
+    core.pull(conn, owner="w")
+    core.note(conn, nid, long_text, owner="w")
+    ev = [e for e in core.events(conn, node_id=nid) if e["tool"] == "note"]
+    assert len(ev) == 1 and len(ev[0]["detail"]) == 500
+
+
+def test_msg_count_attached_to_query_and_status(conn):
+    nid = core.propose(conn, "task", "s")
+    core.approve(conn, nid)
+    core.message(conn, nid, author="conductor", text="heads up")
+    q = core.query(conn, state="pending")["nodes"]
+    assert q[0]["msg_count"] == 1
+    s = core.status(conn)["open"]
+    assert [n for n in s if n["id"] == nid][0]["msg_count"] == 1

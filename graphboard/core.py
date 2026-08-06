@@ -8,10 +8,20 @@ from .db import OPEN_STATES, STATES, TERMINAL_STATES
 
 PRIORITY_MIN, PRIORITY_MAX, PRIORITY_DEFAULT = 1, 9, 3
 FACT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SUMMARY_MAX = 120
 
 
 class GbError(Exception):
     pass
+
+
+def summary_of(spec):
+    if not spec or not spec.strip():
+        return ""
+    line = spec.strip().splitlines()[0].strip()
+    if len(line) > SUMMARY_MAX:
+        line = line[:SUMMARY_MAX].rstrip() + "…"
+    return line
 
 
 def role_of(owner):
@@ -80,9 +90,10 @@ def _board_dir(conn):
 
 
 def _event(conn, tool, owner, node_id, detail=""):
+    # Audit trail must be reconstructable: detail is stored losslessly.
     conn.execute(
         "INSERT INTO events(ts, tool, owner, node_id, detail) VALUES(?,?,?,?,?)",
-        (now_iso(), tool, owner or "", node_id or "", str(detail or "")[:200]))
+        (now_iso(), tool, owner or "", node_id or "", str(detail or "")))
 
 
 def _fail(conn, tool, owner, node_id, msg):
@@ -129,7 +140,19 @@ def facts(conn):
         "SELECT key, value, updated_at, updated_by FROM facts ORDER BY key")]
 
 
-def pull(conn, owner, type_filter=None, contracts=None):
+def _attach_msg_counts(conn, rows):
+    if not rows:
+        return
+    ids = [r["id"] for r in rows]
+    placeholders = ",".join("?" * len(ids))
+    counts = {r["node_id"]: r["c"] for r in conn.execute(
+        f"SELECT node_id, COUNT(*) c FROM messages WHERE node_id IN "
+        f"({placeholders}) GROUP BY node_id", ids)}
+    for r in rows:
+        r["msg_count"] = counts.get(r["id"], 0)
+
+
+def pull(conn, owner, type_filter=None):
     q = "SELECT * FROM nodes WHERE state='pending' AND archived=0"
     args = []
     if type_filter:
@@ -158,21 +181,19 @@ def pull(conn, owner, type_filter=None, contracts=None):
             messages = _unread_messages(conn, node["id"], owner)
             _event(conn, "pull", owner, node["id"])
             conn.commit()
-            contract = (contracts or {}).get(node["type"])
-            if isinstance(contract, dict):
-                contract = contract.get("contract")
+            # Thin injection: the card face (summary + anchor + deltas), not the
+            # payload. Full spec/outputs are fetched on demand via status(id).
             return {
                 "claimed": {
-                    "id": node["id"], "type": node["type"], "spec": node["spec"],
+                    "id": node["id"], "type": node["type"],
+                    "summary": node["summary"],
                     "note": node["note"], "parent": node["parent"],
                     "on_event": node["on_event"],
                     "priority": node["priority"],
                     "workdir": str(workdir),
                 },
                 "inputs": inputs,
-                "contract": contract,
                 "messages": messages,
-                "facts": facts(conn),
                 "announcements": announcements,
             }
     counts = {s: conn.execute(
@@ -189,7 +210,7 @@ def pull(conn, owner, type_filter=None, contracts=None):
     announcements = _unread_announcements(conn, owner)
     conn.commit()
     return {"claimed": None, "counts": counts, "awaiting_approval": awaiting,
-            "facts": facts(conn), "announcements": announcements}
+            "announcements": announcements}
 
 
 def _descendants(conn, root_id):
@@ -236,10 +257,12 @@ def query(conn, type=None, state=None, under=None, owner=None, limit=20,
             (row["id"],)).fetchall()]
         nodes.append({"id": row["id"], "type": row["type"], "state": row["state"],
                       "owner": row["owner"], "spec": row["spec"],
+                      "summary": row["summary"],
                       "parent": row["parent"], "outputs": outputs,
                       "priority": row["priority"], "archived": row["archived"],
                       "resources": row["resources"],
                       "check_after": row["check_after"]})
+    _attach_msg_counts(conn, nodes)
     return {"nodes": nodes, "truncated": len(nodes) >= int(limit)}
 
 
@@ -361,9 +384,10 @@ def submit(conn, node_id, owner, status, outputs=(), successors=(),
         child_id = new_id(conn)
         conn.execute(
             "INSERT INTO nodes(id, type, state, parent, on_event, owner, spec, "
-            "priority, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "summary, priority, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (child_id, stype, state, node_id, ev, None, sspec,
-             node["priority"], ts, ts))
+             summary_of(sspec), node["priority"], ts, ts))
         conn.execute(
             "INSERT INTO edges(from_id, on_event, to_id) VALUES(?,?,?)",
             (node_id, ev, child_id))
@@ -398,9 +422,10 @@ def split(conn, node_id, owner, children, grammar=None):
         child_id = new_id(conn)
         conn.execute(
             "INSERT INTO nodes(id, type, state, parent, on_event, owner, spec, "
-            "priority, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "summary, priority, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (child_id, stype, state, node_id, "split", None, sspec,
-             node["priority"], ts, ts))
+             summary_of(sspec), node["priority"], ts, ts))
         conn.execute(
             "INSERT INTO edges(from_id, on_event, to_id) VALUES(?,?,?)",
             (node_id, "split", child_id))
@@ -423,15 +448,17 @@ def _check_priority(level):
     return level
 
 
-def propose(conn, type, spec, parent=None, on=None, priority=None):
+def propose(conn, type, spec, parent=None, on=None, priority=None, summary=None):
     if parent is not None:
         _node_or_fail(conn, "propose", "", parent)
     ts = now_iso()
     nid = new_id(conn)
+    summ = (summary or "").strip() or summary_of(spec)
     conn.execute(
         "INSERT INTO nodes(id, type, state, parent, on_event, owner, spec, "
-        "priority, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (nid, type, "proposed", parent, on, None, spec,
+        "summary, priority, created_at, updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (nid, type, "proposed", parent, on, None, spec, summ,
          _check_priority(priority if priority is not None else PRIORITY_DEFAULT),
          ts, ts))
     if parent is not None:
@@ -441,6 +468,20 @@ def propose(conn, type, spec, parent=None, on=None, priority=None):
     _event(conn, "propose", "", nid, f"type={type}")
     conn.commit()
     return nid
+
+
+def set_summary(conn, node_id, text):
+    _node_or_fail(conn, "summary", "", node_id)
+    summ = (text or "").strip()
+    if not summ:
+        raise GbError("summary must not be empty")
+    if len(summ) > SUMMARY_MAX * 2:
+        raise GbError(f"summary should stay under ~{SUMMARY_MAX} chars; "
+                      f"full detail belongs in the spec / a design doc")
+    conn.execute("UPDATE nodes SET summary=?, updated_at=? WHERE id=?",
+                 (summ, now_iso(), node_id))
+    _event(conn, "summary", "", node_id, summ)
+    conn.commit()
 
 
 def status(conn, node_id=None, owner=None):
@@ -473,19 +514,19 @@ def status(conn, node_id=None, owner=None):
     yours = []
     if owner:
         yours = [dict(r) for r in conn.execute(
-            "SELECT id, type, state, spec, note, resources, check_after "
+            "SELECT id, type, state, summary, note, resources, check_after "
             "FROM nodes WHERE owner=? AND archived=0 AND "
             "state IN ('active','running') ORDER BY updated_at DESC",
             (owner,)).fetchall()]
     open_nodes = [dict(r) for r in conn.execute(
-        "SELECT id, type, state, owner, spec, priority, resources, check_after "
-        "FROM nodes WHERE state IN "
+        "SELECT id, type, state, owner, summary, priority, resources, "
+        "check_after FROM nodes WHERE state IN "
         "('pending','active','running','proposed','blocked') AND archived=0 "
         "ORDER BY CASE state WHEN 'active' THEN 0 WHEN 'running' THEN 1 "
         "WHEN 'pending' THEN 2 WHEN 'blocked' THEN 3 ELSE 4 END, "
         "priority ASC, created_at, rowid").fetchall()]
-    return {"counts": counts, "yours": yours, "open": open_nodes,
-            "facts": facts(conn)}
+    _attach_msg_counts(conn, open_nodes)
+    return {"counts": counts, "yours": yours, "open": open_nodes}
 
 
 def cancel(conn, node_id, reason=""):
@@ -554,6 +595,39 @@ def release(conn, node_id, reason=""):
         "UPDATE nodes SET state='pending', owner=NULL, updated_at=? WHERE id=?",
         (now_iso(), node_id))
     _event(conn, "release", "", node_id, reason or "released to pending")
+    conn.commit()
+
+
+def unclaim(conn, node_id, owner, reason=""):
+    node = _node_or_fail(conn, "release", owner, node_id)
+    if node["state"] != "active":
+        _fail(conn, "release", owner, node_id,
+              f"node {node_id} is {node['state']}, only an active node can be "
+              f"released back by its owner")
+    if node["owner"] != owner:
+        _fail(conn, "release", owner, node_id,
+              f"node {node_id} is owned by {node['owner']}, not {owner}")
+    conn.execute(
+        "UPDATE nodes SET state='pending', owner=NULL, resources=NULL, "
+        "check_after=NULL, updated_at=? WHERE id=?",
+        (now_iso(), node_id))
+    _event(conn, "release", owner, node_id,
+           "self-released to pending" + (f": {reason}" if reason else ""))
+    conn.commit()
+
+
+def charter_get(conn):
+    path = _board_dir(conn) / "charter.md"
+    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+
+
+def charter_set(conn, text, by=""):
+    text = (text or "").strip()
+    if not text:
+        raise GbError("charter must not be empty")
+    path = _board_dir(conn) / "charter.md"
+    path.write_text(text + "\n", encoding="utf-8")
+    _event(conn, "charter", by, "", text.splitlines()[0])
     conn.commit()
 
 
