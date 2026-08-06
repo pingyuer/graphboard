@@ -67,10 +67,22 @@ def cmd_init(args):
 
 def cmd_list(args):
     conn, _, _ = open_board(args)
+    if args.archived:
+        rows = conn.execute(
+            "SELECT id, type, state, owner, spec FROM nodes WHERE archived=1 "
+            "ORDER BY created_at").fetchall()
+        if not rows:
+            print("no archived nodes")
+        for r in rows:
+            owner = f" [{r['owner']}]" if r["owner"] else ""
+            print(f"{r['id']} ({r['type']}, {r['state']}){owner} "
+                  f"{r['spec'].splitlines()[0]}")
+        return 0
     if args.state:
         rows = conn.execute(
-            "SELECT id, type, state, owner, spec FROM nodes WHERE state=? "
-            "ORDER BY created_at", (args.state,)).fetchall()
+            "SELECT id, type, state, owner, spec FROM nodes "
+            "WHERE state=? AND archived=0 "
+            "ORDER BY priority ASC, created_at", (args.state,)).fetchall()
         if not rows:
             print(f"no {args.state} nodes")
         for r in rows:
@@ -90,15 +102,74 @@ def cmd_show(args):
 def cmd_query(args):
     conn, _, _ = open_board(args)
     result = core.query(conn, type=args.type, state=args.state, under=args.under,
-                        owner=args.owner, limit=args.limit)
+                        owner=args.owner, limit=args.limit,
+                        include_archived=args.archived)
     print(render.render_query(result))
     return 0
 
 
 def cmd_propose(args):
     conn, _, _ = open_board(args)
-    nid = core.propose(conn, args.type, args.spec, parent=args.parent, on=args.on)
+    nid = core.propose(conn, args.type, args.spec, parent=args.parent,
+                       on=args.on, priority=args.priority)
     print(render.render_propose(nid))
+    return 0
+
+
+def cmd_priority(args):
+    conn, _, _ = open_board(args)
+    core.set_priority(conn, args.id, args.level, reason=args.reason or "")
+    print(render.render_priority(args.id, args.level))
+    return 0
+
+
+def cmd_message(args):
+    conn, _, _ = open_board(args)
+    core.message(conn, args.id, author=args.author or "human", text=args.text,
+                 audience=args.audience or "*")
+    print(render.render_message(args.id, args.audience or "*"))
+    return 0
+
+
+def cmd_fact(args):
+    conn, _, _ = open_board(args)
+    if args.fact_cmd == "set":
+        core.fact_set(conn, args.key, args.value, by="human")
+        print(render.render_fact_set(args.key.strip()))
+    elif args.fact_cmd == "remove":
+        core.fact_remove(conn, args.key, by="human")
+        print(render.render_fact_remove(args.key.strip()))
+    else:
+        print(render.render_facts(core.facts(conn)))
+    return 0
+
+
+def cmd_reopen(args):
+    conn, _, _ = open_board(args)
+    prev = core.status(conn, args.id)["node"]["state"]
+    core.reopen(conn, args.id, reason=args.reason or "")
+    print(render.render_reopen(args.id, prev))
+    return 0
+
+
+def cmd_archive(args):
+    conn, _, _ = open_board(args)
+    count = core.archive(conn, args.id, under=args.under)
+    print(render.render_archive(args.id, count))
+    return 0
+
+
+def cmd_restore(args):
+    conn, _, _ = open_board(args)
+    core.restore(conn, args.id)
+    print(render.render_restore(args.id))
+    return 0
+
+
+def cmd_supersede(args):
+    conn, _, _ = open_board(args)
+    result = core.supersede(conn, args.old, args.new, reason=args.reason or "")
+    print(render.render_supersede(result))
     return 0
 
 
@@ -195,8 +266,10 @@ def cmd_reject(args):
 def cmd_announce(args):
     conn, _, _ = open_board(args)
     ann_id = core.announce(conn, text=args.text, clear=args.clear,
-                           ttl_days=args.ttl_days or None)
-    print(render.render_announce(ann_id, args.clear))
+                           ttl_days=args.ttl_days or None,
+                           audience=args.audience or "*")
+    print(render.render_announce(ann_id, args.clear,
+                                 audience=args.audience or "*"))
     return 0
 
 
@@ -304,18 +377,31 @@ def cmd_export(args):
     overview = core.status(conn)
     lines.append("counts: " + ", ".join(f"{k}: {v}" for k, v in overview["counts"].items()))
     lines.append("")
-    for state in ("active", "pending", "proposed", "blocked", "done", "rejected"):
+    if overview.get("facts"):
+        lines.append("## facts")
+        lines.extend(f"- {f['key']}: {f['value']}" for f in overview["facts"])
+        lines.append("")
+    for state in ("active", "running", "pending", "proposed", "blocked",
+                  "done", "rejected", "canceled"):
         rows = conn.execute(
-            "SELECT id, type, owner, spec, note FROM nodes WHERE state=? "
-            "ORDER BY created_at", (state,)).fetchall()
+            "SELECT id, type, owner, spec, note, priority FROM nodes "
+            "WHERE state=? AND archived=0 "
+            "ORDER BY priority ASC, created_at", (state,)).fetchall()
         if not rows:
             continue
         lines.append(f"## {state}")
         for r in rows:
             owner = f" [{r['owner']}]" if r["owner"] else ""
-            lines.append(f"- {r['id']} ({r['type']}){owner}: {r['spec']}")
+            prio = f" [p{r['priority']}]" if r["priority"] != core.PRIORITY_DEFAULT else ""
+            lines.append(f"- {r['id']} ({r['type']}){owner}{prio}: {r['spec']}")
             if r["note"]:
                 lines.append(f"  note: {r['note']}")
+        lines.append("")
+    archived = conn.execute(
+        "SELECT COUNT(*) c FROM nodes WHERE archived=1").fetchone()["c"]
+    if archived:
+        lines.append(f"## archived: {archived} node(s) hidden "
+                     f"(gb list --archived to view)")
         lines.append("")
     edges = conn.execute(
         "SELECT from_id, on_event, to_id FROM edges ORDER BY rowid").fetchall()
@@ -351,6 +437,8 @@ def build_parser():
 
     p = sub.add_parser("list", help="show board overview or nodes by state")
     p.add_argument("--state")
+    p.add_argument("--archived", action="store_true",
+                   help="list archived nodes instead of the live board")
     p.set_defaults(fn=cmd_list)
 
     p = sub.add_parser("show", help="show one node with lineage")
@@ -363,6 +451,8 @@ def build_parser():
     p.add_argument("--under", help="subtree of this node id (inclusive)")
     p.add_argument("--owner")
     p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--archived", action="store_true",
+                   help="include archived nodes")
     p.set_defaults(fn=cmd_query)
 
     p = sub.add_parser("propose", help="propose a new node (needs approval)")
@@ -370,7 +460,62 @@ def build_parser():
     p.add_argument("--spec", required=True)
     p.add_argument("--parent")
     p.add_argument("--on")
+    p.add_argument("--priority", type=int, default=None,
+                   help="1-9, lower is served first (default 3)")
     p.set_defaults(fn=cmd_propose)
+
+    p = sub.add_parser("priority", help="re-prioritize a proposed|pending|blocked "
+                                        "node (scheduling hint, not a dependency)")
+    p.add_argument("id")
+    p.add_argument("level", type=int)
+    p.add_argument("--reason")
+    p.set_defaults(fn=cmd_priority)
+
+    p = sub.add_parser("message", help="append a directed message to a node "
+                                       "(any state; delivered at next pull)")
+    p.add_argument("id")
+    p.add_argument("--text", required=True)
+    p.add_argument("--audience", default="*",
+                   help="'*', a role name or an owner name")
+    p.add_argument("--author", default="human")
+    p.set_defaults(fn=cmd_message)
+
+    p = sub.add_parser("fact", help="project facts (volatile truths injected "
+                                    "at every pull)")
+    fact_sub = p.add_subparsers(dest="fact_cmd", required=True)
+    pf = fact_sub.add_parser("set")
+    pf.add_argument("key")
+    pf.add_argument("value")
+    pf.set_defaults(fn=cmd_fact)
+    pf = fact_sub.add_parser("remove")
+    pf.add_argument("key")
+    pf.set_defaults(fn=cmd_fact)
+    pf = fact_sub.add_parser("list")
+    pf.set_defaults(fn=cmd_fact)
+
+    p = sub.add_parser("reopen", help="reopen a terminal node back to pending "
+                                      "(world changed after it closed)")
+    p.add_argument("id")
+    p.add_argument("--reason")
+    p.set_defaults(fn=cmd_reopen)
+
+    p = sub.add_parser("archive", help="archive terminal node(s) to cold storage "
+                                       "(hidden from live views, restorable)")
+    p.add_argument("id")
+    p.add_argument("--under", action="store_true",
+                   help="archive the whole subtree (atomic)")
+    p.set_defaults(fn=cmd_archive)
+
+    p = sub.add_parser("restore", help="restore an archived node to live views")
+    p.add_argument("id")
+    p.set_defaults(fn=cmd_restore)
+
+    p = sub.add_parser("supersede", help="atomically replace old (proposed|pending) "
+                                         "with new: cancel old + approve new")
+    p.add_argument("old")
+    p.add_argument("new")
+    p.add_argument("--reason")
+    p.set_defaults(fn=cmd_supersede)
 
     p = sub.add_parser("pull", help="claim the next pending node")
     p.add_argument("--owner", required=True)
@@ -441,11 +586,13 @@ def build_parser():
     p.add_argument("id")
     p.set_defaults(fn=cmd_reject)
 
-    p = sub.add_parser("announce", help="broadcast to all agents")
+    p = sub.add_parser("announce", help="broadcast to agents")
     p.add_argument("text", nargs="?")
     p.add_argument("--clear", action="store_true")
     p.add_argument("--ttl-days", dest="ttl_days", type=float, default=0,
                    help="auto-expire after N days (default: never)")
+    p.add_argument("--audience", default="*",
+                   help="'*', a role name or an owner name (default: everyone)")
     p.set_defaults(fn=cmd_announce)
 
     p = sub.add_parser("grammar", help="grammar inspection and structured editing")

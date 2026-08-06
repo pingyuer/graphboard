@@ -118,6 +118,10 @@ gb：根节点已播下。新开一个会话切到提案角色，说「pull 你�
   `proposed → pending → active → running → done`，加 `blocked / rejected / canceled`。
   - `active` = agent 正拿在手里（占**注意力**，一个脑子同时只有一份）
   - `running` = 工作自主执行中、agent 已脱身（占**外部资源**，可以有多个）
+- **优先级调度**：每个节点带 `priority`（1-9，默认 3，小数先被 pull）。这是
+  **调度提示，不是依赖**——不建模先后约束，只决定队列里谁先被认领。submit/split
+  派生的子节点继承父优先级；conductor 用 `gba_priority` 重排排队中的节点
+  （配合 hold 的"移出队列"，priority 是"队列内排序"）。
 - **创建自由，生效受控**：`gb_propose` 恒为 proposed；`gb_submit` 声明的后继由文法
   裁决——`auto` 规则直接 pending，其余等人批。`default: approve` 兜底。
   submit 若漏声明了文法里的 auto 后继，返回里会带 notice 提醒。
@@ -131,6 +135,28 @@ gb：根节点已播下。新开一个会话切到提案角色，说「pull 你�
   任务怎么切，上下文就怎么切。
 - **治理动作**：`hold`（推迟排队节点）、`release`（复活 blocked）、
   `cancel`（作废被取代/放弃的节点，终态、留审计）、approve/reject。
+- **修复动作（图的纠错能力）**：状态是图对外部世界的承诺，承诺可以被修复——
+  `reopen`（终态 done/rejected/canceled 拉回 pending，世界变了就改图，锚点保留、
+  events 留痕）、`archive`/`restore`（终态节点收进冷库，活图视图不再扫到，可
+  恢复）、`supersede`（原子取代：cancel 旧 + 批准新 + 记 superseded_by，一个
+  意图一条审计）。修复永远是留痕的原子操作，绝不静默改写历史。
+
+## 注入平面：render(role, node, now)
+
+MCP 是唯一的上下文注入点；每个 agent 看到的内容是
+**f(调用者身份, 节点, 当前时刻)**。注入追求四条性质：分角色、新鲜、蒸馏、最小。
+
+- **anchor 与 message 分离**：`nodes.note` 是 worker 的**锚点**（我在哪、怎么续传），
+  仅 owner 可写，release 接管时保留；conductor 的指令/通报走 `gba_message`
+  （追加式、带作者与受众、任何状态可写包括 done），在受众下次 pull/status 时投递，
+  永不覆盖锚点。
+- **受众过滤**：`audience` 可以是 `*`（全体）、角色名（如 experimenter）或 owner
+  全名。announce 与 message 都只在受众匹配时投递。
+- **facts 层**：`gba_fact` 存少量易变事实（端口、URI、机器清单），每次 pull 全量
+  注入，是环境真相的唯一来源——别把它们冻进 spec 或角色文件。facts 应当只有几句，
+  静态上下文留给 init 工件与仓库。
+- **自我视图**：`gb_status` 传 owner 时优先列出本人 active/running 节点（含锚点），
+  会话死亡重开 = 一次确定性的重定位。
 - **文法**：`transitions.yaml`，结构化编辑（写前 `gb grammar check` 校验，非法拒绝落盘）。
   引用未声明的节点类型会**自动声明**（占位 contract，doctor 会提醒你补全）；
   闭环无根默认拒绝（错误信息附两条出路），`force` 可显式接受。
@@ -147,7 +173,7 @@ gb：根节点已播下。新开一个会话切到提案角色，说「pull 你�
 | 命名空间 | 工具 | 谁可用 |
 |---|---|---|
 | `gb_*` 工作 | pull / submit / split / delegate / reactivate / propose / note / status / query / doctor | 全体角色 |
-| `gba_*` 治理 | approve / reject / release / cancel / hold / announce / role / grammar / bootstrap / export | 仅 gb |
+| `gba_*` 治理 | approve / reject / release / cancel / hold / announce / priority / message / fact / reopen / archive / restore / supersede / role / grammar / bootstrap / export | 仅 gb |
 
 `gb init` 生成的 opencode.json 里 `gba_*` 全局禁用、gb 覆盖启用——之后生成的
 任何新角色自动无权，零维护保住权力边界。控制面文件（`.board/`、角色文件、
@@ -172,13 +198,22 @@ board 定位优先级：`--board` → `$GB_BOARD` → 从 cwd 向上找 `.board/
 ```bash
 gb init [dir] [--name N] [--template minimal|rd-classic|experiment|branching]
               [--agents gb,proposal,...] [--git] [--force]
-gb list / show <id> / export
-gb query --type T --state S --under <id> --owner O
+gb list [--state S] [--archived] / show <id> / export
+gb query --type T --state S --under <id> --owner O [--archived]
 gb approve <id> | reject <id> | hold <id> | release <id> | cancel <id>
-gb announce "..." [--ttl-days N] [--clear]
+gb announce "..." [--ttl-days N] [--audience A] [--clear]
 gb split <id> --owner O --child TYPE|SPEC [--child ...]
 gb delegate <id> --owner O [--resources R] [--note N] [--check-after T]
 gb reactivate <id> --owner O
+# 调度
+gb priority <id> LEVEL [--reason R]          # 1-9，小数先被 pull（默认 3）
+# 注入
+gb message <id> --text "..." [--audience A]  # 定向消息，pull/status 投递
+gb fact set KEY VALUE | fact remove KEY | fact list
+# 修复
+gb reopen <id> [--reason R]                  # 终态拉回 pending（世界变了）
+gb archive <id> [--under] | restore <id>     # 冷库归档 / 恢复
+gb supersede OLD NEW [--reason R]            # 原子取代（cancel+approve）
 gb role new NAME --repo R --desc D --claims T1,T2   # gb 对话之外的手动通道
 gb grammar check
 gb grammar add --from X --on E --to Y [--activate auto] [--budget N]
@@ -279,6 +314,10 @@ graphboard/
 5. **蒸馏，不倾倒**：跨会话的只有蒸馏物，对话不过界。
 6. **乐观并发**：共享工作副本，多写不锁；原子认领不撞活；重定位靠 pull/query。
 7. **会话一次性**：脏了就杀掉重开，pull + anchor 无缝接上。
+8. **注入即渲染**：agent 看到的上下文是 render(角色, 节点, 当前时刻)——分角色、
+   新鲜、蒸馏、最小。锚点归 owner，指令走消息，环境真相在 facts。
+9. **状态可纠错**：图的状态是对外部世界的承诺；承诺失效时有留痕的修复路径
+   （reopen/archive/supersede），图能自愈，但从不静默改写历史。
 
 ## Pilot 检查单
 
@@ -293,9 +332,13 @@ graphboard/
 ## 测试
 
 ```bash
-python3 -m pytest tests/ -q   # 126 tests：竞态认领/批内定序/裁决矩阵/文法检查
+python3 -m pytest tests/ -q   # 153 tests：竞态认领/批内定序/裁决矩阵/文法检查
                               # （swap/闭环/自动声明）/query/split/委托执行
                               # （delegate/收割/reactivate）/cancel/hold/TTL/
                               # schema 迁移/release 接管/角色生成与更新/治理工具/
                               # init 脚手架与 git 矩阵/e2e 双情景/MCP 层/泛用性守卫
+                              # 新增三平面：priority 调度（继承/排序/重排/hold-release
+                              # 保持）、注入（受众匹配/message-anchor 分离/note owner
+                              # 守卫/facts/status 自我视图）、修复（reopen/archive 原子
+                              # 子树/restore/supersede）+ e2e 换机事故剧本
 ```

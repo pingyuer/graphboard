@@ -605,8 +605,14 @@ def test_migration_from_old_schema(tmp_path):
     row = conn.execute("SELECT * FROM nodes WHERE id='n-old'").fetchone()
     assert row["state"] == "done" and row["spec"] == "spec"
     assert row["resources"] is None and row["check_after"] is None
-    assert "expires_at" in {r["name"] for r in
-                            conn.execute("PRAGMA table_info(announcements)")}
+    assert row["priority"] == core.PRIORITY_DEFAULT
+    assert row["archived"] == 0 and row["superseded_by"] is None
+    ann_cols = {r["name"] for r in conn.execute("PRAGMA table_info(announcements)")}
+    assert {"expires_at", "audience"} <= ann_cols
+    for table in ("messages", "message_reads", "facts"):
+        assert conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table,)).fetchone() is not None
     n = core.propose(conn, "task", "new era")
     core.approve(conn, n)
     core.pull(conn, owner="w")
@@ -618,3 +624,291 @@ def test_migration_from_old_schema(tmp_path):
     conn2 = db.connect(dbpath)
     assert conn2.execute("SELECT COUNT(*) c FROM nodes").fetchone()["c"] == 2
     conn2.close()
+
+
+# --- scheduling plane: priority ---
+
+def test_priority_default_and_propose(conn):
+    nid = core.propose(conn, "task", "normal")
+    assert conn.execute("SELECT priority FROM nodes WHERE id=?",
+                        (nid,)).fetchone()[0] == 3
+    hot = core.propose(conn, "task", "urgent", priority=1)
+    assert conn.execute("SELECT priority FROM nodes WHERE id=?",
+                        (hot,)).fetchone()[0] == 1
+    with pytest.raises(core.GbError):
+        core.propose(conn, "task", "bad", priority=0)
+    with pytest.raises(core.GbError):
+        core.propose(conn, "task", "bad", priority=10)
+
+
+def test_priority_pull_serves_lower_first(conn):
+    a = core.propose(conn, "task", "a"); core.approve(conn, a)
+    b = core.propose(conn, "task", "b"); core.approve(conn, b)
+    c = core.propose(conn, "task", "c"); core.approve(conn, c)
+    core.set_priority(conn, c, 1)
+    got = core.pull(conn, owner="w")["claimed"]["id"]
+    assert got == c
+    got2 = core.pull(conn, owner="w2")["claimed"]["id"]
+    assert got2 == a
+
+
+def test_priority_inherited_by_successors(conn, grammar):
+    nid = core.propose(conn, "proposal", "urgent root", priority=1)
+    core.approve(conn, nid)
+    core.pull(conn, owner="w")
+    core.note(conn, nid, "x", owner="w")
+    r = core.submit(conn, nid, owner="w", status="done",
+                    outputs=[{"path": "out/p"}],
+                    successors=[{"type": "implementation", "spec": "s"}],
+                    grammar=grammar)
+    child = r["successors"][0]["id"]
+    assert conn.execute("SELECT priority FROM nodes WHERE id=?",
+                        (child,)).fetchone()[0] == 1
+
+
+def test_priority_inherited_by_split(conn):
+    nid = core.propose(conn, "task", "big urgent", priority=2)
+    core.approve(conn, nid)
+    core.pull(conn, owner="w")
+    r = core.split(conn, nid, owner="w",
+                   children=[{"type": "task", "spec": "c1"},
+                             {"type": "task", "spec": "c2"}])
+    for c in r["children"]:
+        assert conn.execute("SELECT priority FROM nodes WHERE id=?",
+                            (c["id"],)).fetchone()[0] == 2
+
+
+def test_set_priority_validation(conn):
+    nid = core.propose(conn, "task", "s")
+    core.approve(conn, nid)
+    core.pull(conn, owner="w")
+    with pytest.raises(core.GbError):
+        core.set_priority(conn, nid, 5)
+    with pytest.raises(core.GbError):
+        core.set_priority(conn, nid, 0)
+    core.submit(conn, nid, owner="w", status="done", outputs=[{"path": "o"}])
+    with pytest.raises(core.GbError):
+        core.set_priority(conn, nid, 5)
+
+
+def test_set_priority_survives_hold_release(conn):
+    nid = core.propose(conn, "task", "s")
+    core.approve(conn, nid)
+    core.hold(conn, nid, reason="park")
+    core.set_priority(conn, nid, 1)
+    core.release(conn, nid)
+    assert conn.execute("SELECT priority FROM nodes WHERE id=?",
+                        (nid,)).fetchone()[0] == 1
+
+
+# --- injection plane: audience, messages, facts, status self-view ---
+
+def test_audience_match():
+    assert core.audience_match("*", "impl-a")
+    assert core.audience_match(None, "impl-a")
+    assert core.audience_match("impl", "impl-a")
+    assert core.audience_match("impl-a", "impl-a")
+    assert not core.audience_match("review", "impl-a")
+    assert not core.audience_match("impl-b", "impl-a")
+    assert core.role_of("impl-a") == "impl"
+    assert core.role_of("solo") == "solo"
+
+
+def test_announce_audience_delivered_only_to_match(conn):
+    core.announce(conn, text="gpu ports changed", audience="experimenter")
+    r_exp = core.pull(conn, owner="experimenter-a")
+    assert any("gpu ports" in a["text"] for a in r_exp["announcements"])
+    r_des = core.pull(conn, owner="designer-a")
+    assert r_des["announcements"] == []
+    conn.execute("INSERT INTO nodes(id,type,state,spec,created_at,updated_at,"
+                 "priority,archived) VALUES('n-x','task','pending','s',"
+                 "'2020-01-01','2020-01-01',3,0)")
+    conn.commit()
+    r_des2 = core.pull(conn, owner="designer-a")
+    assert r_des2["claimed"]["id"] == "n-x"
+    assert r_des2["announcements"] == []
+
+
+def test_message_delivered_at_pull_with_anchor_intact(conn):
+    nid = core.propose(conn, "task", "s")
+    core.approve(conn, nid)
+    core.pull(conn, owner="w-a")
+    core.note(conn, nid, "anchor by w-a", owner="w-a")
+    core.message(conn, nid, author="conductor", text="hold your horses",
+                 audience="*")
+    core.submit(conn, nid, owner="w-a", status="blocked")
+    core.release(conn, nid)
+    r = core.pull(conn, owner="w-b")
+    assert r["claimed"]["id"] == nid
+    assert r["claimed"]["note"] == "anchor by w-a"
+    assert any("hold your horses" in m["text"] for m in r["messages"])
+    reads = conn.execute("SELECT COUNT(*) c FROM message_reads WHERE "
+                         "recipient='w-b'").fetchone()["c"]
+    assert reads == 1
+
+
+def test_message_audience_filtering(conn):
+    nid = core.propose(conn, "task", "s")
+    core.approve(conn, nid)
+    core.message(conn, nid, author="conductor", text="only for impl",
+                 audience="impl")
+    core.message(conn, nid, author="conductor", text="for everyone")
+    r = core.pull(conn, owner="impl-a")
+    texts = [m["text"] for m in r["messages"]]
+    assert "only for impl" in texts and "for everyone" in texts
+    assert r["claimed"]["id"] == nid
+
+
+def test_note_owner_enforced(conn):
+    nid = core.propose(conn, "task", "s")
+    core.approve(conn, nid)
+    core.pull(conn, owner="w-a")
+    core.note(conn, nid, "mine", owner="w-a")
+    with pytest.raises(core.GbError):
+        core.note(conn, nid, "intruder", owner="w-b")
+    core.note(conn, nid, "human override")
+    assert conn.execute("SELECT note FROM nodes WHERE id=?",
+                        (nid,)).fetchone()[0] == "human override"
+
+
+def test_facts_set_list_remove_and_injection(conn):
+    core.fact_set(conn, "gpu-servers", "32217/30318", by="gb")
+    core.fact_set(conn, "mlflow", "http://172.16.240.77:5000", by="gb")
+    rows = core.facts(conn)
+    assert [f["key"] for f in rows] == ["gpu-servers", "mlflow"]
+    core.fact_set(conn, "gpu-servers", "changed", by="gb")
+    assert core.facts(conn)[0]["value"] == "changed"
+    with pytest.raises(core.GbError):
+        core.fact_set(conn, "bad key!", "v")
+    with pytest.raises(core.GbError):
+        core.fact_set(conn, "k", " ")
+    nid = core.propose(conn, "task", "s")
+    core.approve(conn, nid)
+    r = core.pull(conn, owner="w")
+    assert any(f["key"] == "gpu-servers" for f in r["facts"])
+    core.fact_remove(conn, "mlflow", by="gb")
+    with pytest.raises(core.GbError):
+        core.fact_remove(conn, "nope")
+
+
+def test_status_owner_self_view(conn):
+    a = core.propose(conn, "task", "a"); core.approve(conn, a)
+    b = core.propose(conn, "task", "b"); core.approve(conn, b)
+    core.pull(conn, owner="w-a")
+    core.pull(conn, owner="w-b")
+    core.delegate(conn, b, owner="w-b", resources="gpu:x")
+    s = core.status(conn, owner="w-b")
+    assert [n["id"] for n in s["yours"]] == [b]
+    assert s["yours"][0]["state"] == "running"
+    s2 = core.status(conn, owner="nobody")
+    assert s2["yours"] == []
+    assert "facts" in s and "counts" in s
+
+
+# --- repair plane: reopen, archive/restore, supersede ---
+
+def _done_node(conn, spec="s"):
+    nid = core.propose(conn, "task", spec)
+    core.approve(conn, nid)
+    core.pull(conn, owner="w")
+    core.submit(conn, nid, owner="w", status="done",
+                outputs=[{"path": "out/x"}], note="final anchor")
+    return nid
+
+
+def test_reopen_done_back_to_pending(conn):
+    nid = _done_node(conn)
+    core.reopen(conn, nid, reason="world changed")
+    row = conn.execute("SELECT * FROM nodes WHERE id=?", (nid,)).fetchone()
+    assert row["state"] == "pending" and row["owner"] is None
+    assert row["note"] == "final anchor"
+    ev = conn.execute("SELECT detail FROM events WHERE tool='reopen'"
+                      ).fetchone()[0]
+    assert "done -> pending" in ev and "world changed" in ev
+
+
+def test_reopen_rejects_live_nodes(conn):
+    nid = core.propose(conn, "task", "s")
+    core.approve(conn, nid)
+    core.pull(conn, owner="w")
+    with pytest.raises(core.GbError):
+        core.reopen(conn, nid)
+
+
+def test_reopen_unarchives(conn):
+    nid = _done_node(conn)
+    core.archive(conn, nid)
+    core.reopen(conn, nid, reason="resume")
+    row = conn.execute("SELECT state, archived FROM nodes WHERE id=?",
+                       (nid,)).fetchone()
+    assert row["state"] == "pending" and row["archived"] == 0
+
+
+def test_archive_terminal_only_and_atomic_subtree(conn, grammar):
+    nid = core.propose(conn, "proposal", "root")
+    core.approve(conn, nid)
+    core.pull(conn, owner="w")
+    r = core.submit(conn, nid, owner="w", status="done",
+                    outputs=[{"path": "o"}],
+                    successors=[{"type": "implementation", "spec": "child"}],
+                    grammar=grammar)
+    child = r["successors"][0]["id"]
+    with pytest.raises(core.GbError):
+        core.archive(conn, nid, under=True)
+    core.approve(conn, child)
+    core.pull(conn, owner="w2")
+    core.submit(conn, child, owner="w2", status="done",
+                outputs=[{"path": "o2"}])
+    count = core.archive(conn, nid, under=True)
+    assert count == 2
+    assert conn.execute("SELECT archived FROM nodes WHERE id=?",
+                        (child,)).fetchone()[0] == 1
+
+
+def test_archived_hidden_from_live_views(conn):
+    nid = _done_node(conn)
+    core.archive(conn, nid)
+    assert core.query(conn, state="done")["nodes"] == []
+    assert core.query(conn, state="done",
+                      include_archived=True)["nodes"][0]["id"] == nid
+    assert nid not in [n["id"] for n in core.status(conn)["open"]]
+    assert core.status(conn)["counts"]["archived"] == 1
+    core.restore(conn, nid)
+    assert core.query(conn, state="done")["nodes"][0]["id"] == nid
+    with pytest.raises(core.GbError):
+        core.restore(conn, nid)
+
+
+def test_supersede_atomic(conn):
+    old = core.propose(conn, "task", "old plan")
+    core.approve(conn, old)
+    new = core.propose(conn, "task", "improved plan")
+    r = core.supersede(conn, old, new, reason="better idea")
+    assert r == {"old": old, "new": new, "approved": True}
+    old_row = conn.execute("SELECT * FROM nodes WHERE id=?",
+                           (old,)).fetchone()
+    new_row = conn.execute("SELECT * FROM nodes WHERE id=?",
+                           (new,)).fetchone()
+    assert old_row["state"] == "canceled" and old_row["superseded_by"] == new
+    assert new_row["state"] == "pending"
+    evs = conn.execute("SELECT node_id, detail FROM events "
+                       "WHERE tool='supersede' ORDER BY id").fetchall()
+    assert len(evs) == 2 and evs[0]["node_id"] == old
+
+
+def test_supersede_validation(conn):
+    old = core.propose(conn, "task", "old")
+    core.approve(conn, old)
+    core.pull(conn, owner="w")
+    new = core.propose(conn, "task", "new")
+    with pytest.raises(core.GbError):
+        core.supersede(conn, old, new)
+    core.submit(conn, old, owner="w", status="done", outputs=[{"path": "o"}])
+    with pytest.raises(core.GbError):
+        core.supersede(conn, old, new)
+    pending_new = core.propose(conn, "task", "pn")
+    core.approve(conn, pending_new)
+    other = core.propose(conn, "task", "o2")
+    core.approve(conn, other)
+    r = core.supersede(conn, other, pending_new)
+    assert r["approved"] is False

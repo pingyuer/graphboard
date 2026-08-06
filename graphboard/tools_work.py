@@ -80,13 +80,14 @@ def register(server, infra):
             return render.render_propose(nid)
         return guard("gb_propose", {"type": type, "spec": spec, "parent": parent}, run)
 
-    @server.tool(description="Board overview (no id) or one node's lineage, children, outputs (with id). "
-                             "Re-orient here after context compaction.")
-    def gb_status(id: str = "") -> str:
+    @server.tool(description="Board overview (no id) or one node's lineage, children, outputs, messages "
+                             "(with id). Re-orient here after a session restart or context compaction: "
+                             "pass your owner name to see your own active/running nodes first.")
+    def gb_status(id: str = "", owner: str = "") -> str:
         def run(conn):
-            result = core.status(conn, id or None)
+            result = core.status(conn, id or None, owner=owner or None)
             return render.render_status(result)
-        return guard("gb_status", {"id": id}, run)
+        return guard("gb_status", {"id": id, "owner": owner}, run)
 
     @server.tool(description="Query nodes by any mix of type/state/under(subtree of a node id, inclusive)/"
                              "owner. Compact list with output paths and held resources (for running nodes); "
@@ -101,12 +102,14 @@ def register(server, infra):
         return guard("gb_query", {"type": type, "state": state, "under": under,
                                   "owner": owner, "limit": limit}, run)
 
-    @server.tool(description="Replace the node's anchor note (current position, progress, sync point).")
-    def gb_note(id: str, text: str) -> str:
+    @server.tool(description="Replace the anchor note on a node you own (current position, progress, "
+                             "sync point). Pass your owner name; anchors are owner-writable. Directives "
+                             "to other roles are governance messages, not anchors.")
+    def gb_note(id: str, text: str, owner: str) -> str:
         def run(conn):
-            core.note(conn, id, text)
+            core.note(conn, id, text, owner=owner)
             return render.render_note(id)
-        return guard("gb_note", {"id": id, "text": text}, run)
+        return guard("gb_note", {"id": id, "text": text, "owner": owner}, run)
 
     @server.tool(description="Read-only board health check. Run it when something feels off.")
     def gb_doctor() -> str:

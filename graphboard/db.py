@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS nodes(
   note TEXT,
   resources TEXT,
   check_after TEXT,
+  priority INTEGER NOT NULL DEFAULT 3,
+  archived INTEGER NOT NULL DEFAULT 0,
+  superseded_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -37,6 +40,7 @@ CREATE TABLE IF NOT EXISTS announcements(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   text TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
+  audience TEXT NOT NULL DEFAULT '*',
   expires_at TEXT,
   created_at TEXT NOT NULL
 );
@@ -44,6 +48,25 @@ CREATE TABLE IF NOT EXISTS announcement_reads(
   owner TEXT NOT NULL,
   ann_id INTEGER NOT NULL,
   PRIMARY KEY(owner, ann_id)
+);
+CREATE TABLE IF NOT EXISTS messages(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_id TEXT NOT NULL,
+  author TEXT NOT NULL,
+  audience TEXT NOT NULL DEFAULT '*',
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS message_reads(
+  recipient TEXT NOT NULL,
+  msg_id INTEGER NOT NULL,
+  PRIMARY KEY(recipient, msg_id)
+);
+CREATE TABLE IF NOT EXISTS facts(
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS meta(
   key TEXT PRIMARY KEY,
@@ -95,9 +118,20 @@ def _migrate(conn):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(nodes)")}
     if cols and not {"resources", "check_after"} <= cols:
         conn.executescript(_NODES_REBUILD)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(nodes)")}
+    for col, decl in (("priority", "INTEGER NOT NULL DEFAULT 3"),
+                      ("archived", "INTEGER NOT NULL DEFAULT 0"),
+                      ("superseded_by", "TEXT")):
+        if cols and col not in cols:
+            conn.execute(f"ALTER TABLE nodes ADD COLUMN {col} {decl}")
+            conn.commit()
     ann_cols = {r["name"] for r in conn.execute("PRAGMA table_info(announcements)")}
     if ann_cols and "expires_at" not in ann_cols:
         conn.execute("ALTER TABLE announcements ADD COLUMN expires_at TEXT")
+        conn.commit()
+    if ann_cols and "audience" not in ann_cols:
+        conn.execute(
+            "ALTER TABLE announcements ADD COLUMN audience TEXT NOT NULL DEFAULT '*'")
         conn.commit()
 
 

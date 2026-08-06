@@ -131,9 +131,25 @@ def run_checks(conn, board, grammar, stale_hours=24.0, orphan_hours=4.0):
         issues.append(f"{expired_ann} expired announcement(s) still active - "
                       f"clear with announce --clear")
 
+    fact_chars = conn.execute(
+        "SELECT COALESCE(SUM(LENGTH(key) + LENGTH(value)), 0) c FROM facts"
+    ).fetchone()["c"]
+    if fact_chars > 1200:
+        issues.append(f"facts store is large ({fact_chars} chars) - facts are for "
+                      f"a few volatile truths (ports/URIs); move stable context into "
+                      f"init artifacts or the repo")
+
+    archivable = conn.execute(
+        "SELECT COUNT(*) c FROM nodes WHERE archived=0 AND state IN "
+        "('done','rejected','canceled') AND "
+        "updated_at < strftime('%Y-%m-%dT%H:%M:%S','now','-14 days')").fetchone()["c"]
+    if archivable:
+        ok.append(f"{archivable} terminal node(s) older than 14 days - "
+                  f"consider 'gb archive' to tidy live views")
+
     counts = {s: conn.execute(
-        "SELECT COUNT(*) c FROM nodes WHERE state=?", (s,)).fetchone()["c"]
-        for s in OPEN_STATES + ("proposed", "done")}
+        "SELECT COUNT(*) c FROM nodes WHERE state=? AND archived=0", (s,)
+    ).fetchone()["c"] for s in OPEN_STATES + ("proposed", "done")}
     if not any(counts[s] for s in OPEN_STATES + ("proposed",)):
         ok.append(f"chain at rest ({counts['done']} done) - harvest results "
                   f"or seed the next round")

@@ -11,11 +11,11 @@ from .gitutil import git_baseline
 from .grammar import GrammarError, load, load_nodetypes
 
 INSTRUCTIONS = """graphboard coordinates work as a task graph.
-1 Start work with gb_pull using an owner name in role-instance format (e.g. impl-a); claim a node, work only on it.
+1 Start work with gb_pull using an owner name in role-instance format (e.g. impl-a); claim a node, work only on it. Pull serves lower priority numbers first; facts (volatile project truths) are injected at every pull.
 2 Load context on demand: the node's inputs plus what gb_query finds relevant. Never roam the board.
-3 Track progress with gb_note; finish with gb_submit (declare successors when the workflow expects them). If a node grows too big, gb_split it into self-contained children.
-4 If lost or after context compaction: gb_status first; gb_doctor checks board health.
-5 Approval, announcements, roles and the grammar belong to the gb conductor role and the human; never act beyond the current node."""
+3 Track progress with gb_note (your own nodes only - the anchor is owner-writable); finish with gb_submit (declare successors when the workflow expects them). If a node grows too big, gb_split it into self-contained children.
+4 If lost, after a session restart or context compaction: gb_status with your owner name first (shows your active/running nodes); gb_doctor checks board health.
+5 Approval, announcements, messages, facts, roles and the grammar belong to the gb conductor role and the human; never act beyond the current node."""
 
 
 def _resolve_board_dir():

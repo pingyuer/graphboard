@@ -1,3 +1,5 @@
+from .core import PRIORITY_DEFAULT
+
 OVERVIEW_BUDGET = 20
 
 
@@ -8,6 +10,26 @@ def _first_line(text, limit=80):
     return line if len(line) <= limit else line[:limit] + "..."
 
 
+def _prio(p):
+    return f" [p{p}]" if p is not None and p != PRIORITY_DEFAULT else ""
+
+
+def _facts_lines(facts):
+    if not facts:
+        return []
+    return ["facts:"] + [f"  - {f['key']}: {f['value']}" for f in facts]
+
+
+def _messages_lines(messages):
+    if not messages:
+        return []
+    lines = ["messages:"]
+    for m in messages:
+        to = "" if m.get("audience", "*") == "*" else f" to={m['audience']}"
+        lines.append(f"  - [{m['author']}]{to} {m['text']}")
+    return lines
+
+
 def render_pull(result):
     if result.get("claimed") is None:
         counts = result["counts"]
@@ -16,6 +38,7 @@ def render_pull(result):
         if result.get("awaiting_approval"):
             lines.append(f"note: {result['awaiting_approval']} proposed node(s) await "
                          f"human approval - wait or ask, do not start working")
+        lines.extend(_facts_lines(result.get("facts")))
         if result.get("announcements"):
             lines.append("announcements:")
             for a in result["announcements"]:
@@ -23,12 +46,12 @@ def render_pull(result):
         return "\n".join(lines)
     c = result["claimed"]
     lines = [
-        f"claimed: {c['id']}",
+        f"claimed: {c['id']}{_prio(c.get('priority'))}",
         f"type: {c['type']}",
         f"spec: {c['spec']}",
     ]
     if c.get("note"):
-        lines.append(f"note: {c['note']}")
+        lines.append(f"anchor: {c['note']}")
     if c.get("workdir"):
         lines.append(f"workdir: {c['workdir']}")
     if c.get("baseline"):
@@ -43,6 +66,8 @@ def render_pull(result):
     if result.get("contract"):
         lines.append("contract:")
         lines.extend("  " + l for l in result["contract"].strip().splitlines())
+    lines.extend(_messages_lines(result.get("messages")))
+    lines.extend(_facts_lines(result.get("facts")))
     if result.get("announcements"):
         lines.append("announcements:")
         for a in result["announcements"]:
@@ -84,18 +109,20 @@ def render_status(result):
     if "node" in result:
         n = result["node"]
         lines = [
-            f"id: {n['id']}",
+            f"id: {n['id']}{_prio(n.get('priority'))}",
             f"type: {n['type']}",
-            f"state: {n['state']}",
+            f"state: {n['state']}" + (" (archived)" if n.get("archived") else ""),
             f"owner: {n['owner'] or '-'}",
             f"spec: {n['spec']}",
         ]
         if n.get("note"):
-            lines.append(f"note: {n['note']}")
+            lines.append(f"anchor: {n['note']}")
         if n.get("resources"):
             lines.append(f"resources: {n['resources']}")
         if n.get("check_after"):
             lines.append(f"check_after: {n['check_after']}")
+        if n.get("superseded_by"):
+            lines.append(f"superseded_by: {n['superseded_by']}")
         if result.get("parent"):
             p = result["parent"]
             lines.append(f"parent: {p['id']} ({p['type']}, {p['state']})")
@@ -108,19 +135,30 @@ def render_status(result):
             for o in result["outputs"]:
                 suffix = f"  ({o['note']})" if o.get("note") else ""
                 lines.append(f"  - {o['path']}{suffix}")
+        lines.extend(_messages_lines(result.get("messages")))
         return "\n".join(lines)
     counts = result["counts"]
     lines = ["counts: " + ", ".join(f"{k}: {v}" for k, v in counts.items())]
+    if result.get("yours"):
+        lines.append("your nodes:")
+        for n in result["yours"]:
+            res = f" res={n['resources']}" if n.get("resources") else ""
+            check = f" check_after={n['check_after']}" if n.get("check_after") else ""
+            lines.append(f"  - {n['id']} ({n['type']}, {n['state']}){res}{check}")
+            if n.get("note"):
+                lines.append(f"    anchor: {n['note']}")
     if result.get("open"):
         lines.append("open nodes:")
         for n in result["open"][:OVERVIEW_BUDGET - 2]:
             owner = f" [{n['owner']}]" if n.get("owner") else ""
             res = f" res={n['resources']}" if n.get("resources") else ""
-            lines.append(f"  - {n['id']} ({n['type']}, {n['state']}){owner}{res} "
+            lines.append(f"  - {n['id']} ({n['type']}, {n['state']})"
+                         f"{owner}{_prio(n.get('priority'))}{res} "
                          f"{_first_line(n['spec'], 60)}")
         extra = len(result["open"]) - (OVERVIEW_BUDGET - 2)
         if extra > 0:
             lines.append(f"  ... {extra} more")
+    lines.extend(_facts_lines(result.get("facts")))
     return "\n".join(lines)
 
 
@@ -130,7 +168,9 @@ def render_query(result):
     lines = []
     for n in result["nodes"]:
         owner = f" [{n['owner']}]" if n.get("owner") else ""
-        lines.append(f"{n['id']} ({n['type']}, {n['state']}){owner} "
+        arch = " (archived)" if n.get("archived") else ""
+        lines.append(f"{n['id']} ({n['type']}, {n['state']}){owner}"
+                     f"{_prio(n.get('priority'))}{arch} "
                      f"{_first_line(n['spec'], 60)}")
         if n.get("resources"):
             check = f" check_after={n['check_after']}" if n.get("check_after") else ""
@@ -178,7 +218,54 @@ def render_reject(node_id):
     return f"rejected: {node_id}"
 
 
-def render_announce(ann_id, cleared):
+def render_announce(ann_id, cleared, audience="*"):
     if ann_id is None:
         return "announcements cleared" if cleared else "nothing to announce"
-    return f"announced #{ann_id}" + (" (previous cleared)" if cleared else "")
+    to = f" to={audience}" if audience not in ("*", "", None) else ""
+    return (f"announced #{ann_id}{to}"
+            + (" (previous cleared)" if cleared else ""))
+
+
+def render_priority(node_id, level):
+    return f"priority: {node_id} -> p{level} (pull serves lower numbers first)"
+
+
+def render_message(node_id, audience):
+    to = f" to={audience}" if audience not in ("*", "", None) else ""
+    return f"message recorded on {node_id}{to} (delivered at the audience's next pull/status)"
+
+
+def render_fact_set(key):
+    return f"fact set: {key} (injected at every pull)"
+
+
+def render_fact_remove(key):
+    return f"fact removed: {key}"
+
+
+def render_facts(rows):
+    if not rows:
+        return "no facts recorded"
+    return "\n".join(f"{f['key']}: {f['value']}  "
+                     f"(by {f['updated_by']}, {f['updated_at'][:10]})"
+                     for f in rows)
+
+
+def render_reopen(node_id, prev_state):
+    return (f"reopened: {node_id} -> pending (was {prev_state}; reason in events; "
+            f"anchor preserved for re-pull)")
+
+
+def render_archive(node_id, count):
+    return (f"archived: {count} node(s) under {node_id} (hidden from live views; "
+            f"restore to bring back)")
+
+
+def render_restore(node_id):
+    return f"restored: {node_id} to live views (state unchanged)"
+
+
+def render_supersede(result):
+    approved = " (approved to pending)" if result.get("approved") else ""
+    return (f"superseded: {result['old']} -> canceled; "
+            f"replacement {result['new']}{approved}")

@@ -42,7 +42,7 @@ def test_mcp_full_chain(env):
     assert "contract:" in text
     assert "workdir:" in text
 
-    text = call(server, "gb_note", {"id": nid, "text": "drafting"})
+    text = call(server, "gb_note", {"id": nid, "text": "drafting", "owner": "p"})
     assert "note updated" in text
 
     text = call(server, "gb_submit", {
@@ -236,7 +236,8 @@ def test_mcp_release_reattach_flow(env):
     nid = out.split()[1]
     call(server, "gba_approve", {"id": nid})
     call(server, "gb_pull", {"owner": "w-a"})
-    call(server, "gb_note", {"id": nid, "text": "tmux: n-x on srv1, 50% done"})
+    call(server, "gb_note", {"id": nid, "owner": "w-a",
+                             "text": "tmux: n-x on srv1, 50% done"})
     text = call(server, "gba_release", {"id": nid, "reason": "session died"})
     assert "released" in text
     text = call(server, "gb_pull", {"owner": "w-b"})
@@ -281,7 +282,7 @@ def test_mcp_doctor_tool(env):
     out = call(server, "gb_propose", {"type": "proposal", "spec": "s"})
     call(server, "gba_approve", {"id": out.split()[1]})
     call(server, "gb_pull", {"owner": "p"})
-    call(server, "gb_note", {"id": out.split()[1],
+    call(server, "gb_note", {"id": out.split()[1], "owner": "p",
                              "text": "claimed by p without pull"})
     conn = db.connect(board / "graph.db")
     conn.execute("UPDATE nodes SET state='pending' WHERE type='proposal'")
@@ -300,6 +301,8 @@ def test_mcp_tool_surface(env):
         "gb_pull", "gb_submit", "gb_split", "gb_delegate", "gb_reactivate",
         "gb_propose", "gb_status", "gb_query", "gb_note", "gb_doctor",
         "gba_approve", "gba_release", "gba_cancel", "gba_hold", "gba_announce",
+        "gba_priority", "gba_message", "gba_fact", "gba_reopen", "gba_archive",
+        "gba_restore", "gba_supersede",
         "gba_bootstrap", "gba_role", "gba_grammar", "gba_export"])
 
 
@@ -310,6 +313,116 @@ def test_mcp_errors_are_textual(env):
     assert text.startswith("error: node not found")
     text = call(server, "gba_approve", {"id": "n-nope"})
     assert text.startswith("error:")
+
+
+def _claim(server, spec="s", ntype="proposal"):
+    out = call(server, "gb_propose", {"type": ntype, "spec": spec})
+    nid = out.split()[1]
+    call(server, "gba_approve", {"id": nid})
+    return nid
+
+
+def test_mcp_priority_flow(env):
+    server, _, _ = env
+    a = _claim(server, "a"); b = _claim(server, "b")
+    text = call(server, "gba_priority", {"id": b, "level": 1,
+                                         "reason": "urgent"})
+    assert "p1" in text
+    text = call(server, "gb_pull", {"owner": "w"})
+    assert f"claimed: {b}" in text and "[p1]" in text
+    text = call(server, "gba_priority", {"id": a, "level": 99})
+    assert text.startswith("error:")
+
+
+def test_mcp_message_and_note_guard(env):
+    server, _, _ = env
+    nid = _claim(server)
+    call(server, "gb_pull", {"owner": "impl-a"})
+    call(server, "gb_note", {"id": nid, "owner": "impl-a", "text": "my anchor"})
+    text = call(server, "gb_note", {"id": nid, "owner": "intruder-b",
+                                    "text": "steal"})
+    assert text.startswith("error:") and "owner-writable" in text
+    call(server, "gba_message", {"id": nid, "text": "directive for impl",
+                                 "audience": "impl"})
+    call(server, "gba_message", {"id": nid, "text": "for reviewers only",
+                                 "audience": "review"})
+    text = call(server, "gb_status", {"id": nid})
+    assert "my anchor" in text
+    assert "directive for impl" in text and "for reviewers only" in text
+
+
+def test_mcp_facts_injected_at_pull(env):
+    server, _, _ = env
+    call(server, "gba_fact", {"action": "set", "key": "gpu-ports",
+                              "value": "32217/30318"})
+    text = call(server, "gba_fact", {"action": "list"})
+    assert "gpu-ports: 32217/30318" in text
+    nid = _claim(server)
+    text = call(server, "gb_pull", {"owner": "w"})
+    assert f"claimed: {nid}" in text and "gpu-ports: 32217/30318" in text
+    call(server, "gba_fact", {"action": "remove", "key": "gpu-ports"})
+    text = call(server, "gba_fact", {"action": "list"})
+    assert "no facts" in text
+
+
+def test_mcp_announce_audience(env):
+    server, _, _ = env
+    call(server, "gba_announce", {"text": "impl-only notice",
+                                  "audience": "impl"})
+    _claim(server)
+    text = call(server, "gb_pull", {"owner": "impl-a"})
+    assert "impl-only notice" in text
+    _claim(server)
+    text = call(server, "gb_pull", {"owner": "review-a"})
+    assert "impl-only notice" not in text
+
+
+def test_mcp_status_owner_view(env):
+    server, _, _ = env
+    a = _claim(server, "a"); b = _claim(server, "b")
+    call(server, "gb_pull", {"owner": "w-a"})
+    call(server, "gb_pull", {"owner": "w-b"})
+    call(server, "gb_delegate", {"id": b, "owner": "w-b",
+                                 "resources": "gpu:srv1"})
+    text = call(server, "gb_status", {"owner": "w-b"})
+    assert "your nodes:" in text and b in text and "running" in text
+    assert a not in text.split("your nodes:")[1].split("open nodes:")[0]
+
+
+def test_mcp_repair_reopen_archive_supersede(env):
+    server, board, _ = env
+    nid = _claim(server)
+    call(server, "gb_pull", {"owner": "w"})
+    call(server, "gb_submit", {"id": nid, "owner": "w", "status": "done",
+                               "outputs": "out/x"})
+    text = call(server, "gba_reopen", {"id": nid, "reason": "world changed"})
+    assert "reopened" in text and "pending" in text
+    text = call(server, "gb_pull", {"owner": "w2"})
+    assert f"claimed: {nid}" in text
+    call(server, "gb_submit", {"id": nid, "owner": "w2", "status": "done",
+                               "outputs": "out/y"})
+    text = call(server, "gba_archive", {"id": nid})
+    assert "archived" in text
+    text = call(server, "gb_query", {"state": "done"})
+    assert nid not in text
+    text = call(server, "gba_export", {"include_archived": True})
+    assert nid in text and "archived:" in text
+    call(server, "gba_restore", {"id": nid})
+    text = call(server, "gb_query", {"state": "done"})
+    assert nid in text
+
+    old = _claim(server, "old plan")
+    new = call(server, "gb_propose",
+               {"type": "proposal", "spec": "better plan"}).split()[1]
+    text = call(server, "gba_supersede", {"old_id": old, "new_id": new,
+                                          "reason": "improved"})
+    assert "superseded" in text and "canceled" in text
+    conn = db.connect(board / "graph.db")
+    assert conn.execute("SELECT superseded_by FROM nodes WHERE id=?",
+                        (old,)).fetchone()[0] == new
+    assert conn.execute("SELECT state FROM nodes WHERE id=?",
+                        (new,)).fetchone()[0] == "pending"
+    conn.close()
 
 
 def test_mcp_missing_board_env(tmp_path, monkeypatch):

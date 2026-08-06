@@ -45,13 +45,95 @@ def register(server, infra):
         return guard("gba_hold", {"id": id, "reason": reason}, run)
 
     @server.tool(description="GOVERNANCE (gb conductor only). Broadcast an announcement on explicit human "
-                             "instruction; delivered to agents on their next gb_pull. ttl_days: auto-expire "
+                             "instruction; delivered to agents on their next gb_pull. audience: '*' (all), "
+                             "a role name (e.g. experimenter) or an owner name. ttl_days: auto-expire "
                              "after N days (default: never).")
-    def gba_announce(text: str, ttl_days: float = 0) -> str:
+    def gba_announce(text: str, ttl_days: float = 0, audience: str = "*") -> str:
         def run(conn):
-            ann_id = core.announce(conn, text=text, ttl_days=ttl_days or None)
-            return render.render_announce(ann_id, cleared=False)
-        return guard("gba_announce", {"text": text, "ttl_days": ttl_days}, run)
+            ann_id = core.announce(conn, text=text, ttl_days=ttl_days or None,
+                                   audience=audience or "*")
+            return render.render_announce(ann_id, cleared=False,
+                                          audience=audience or "*")
+        return guard("gba_announce", {"text": text, "ttl_days": ttl_days,
+                                      "audience": audience}, run)
+
+    @server.tool(description="GOVERNANCE (gb conductor only). Re-prioritize a proposed|pending|blocked "
+                             "node: level 1-9, lower is served first by gb_pull (default 3). Priority is "
+                             "a scheduling hint, not a dependency.")
+    def gba_priority(id: str, level: int, reason: str = "") -> str:
+        def run(conn):
+            core.set_priority(conn, id, int(level), reason=reason)
+            return render.render_priority(id, int(level))
+        return guard("gba_priority", {"id": id, "level": level, "reason": reason}, run)
+
+    @server.tool(description="GOVERNANCE (gb conductor only). Append a directed message to a node (any "
+                             "state, including done): delivered to matching agents at their next "
+                             "gb_pull/gb_status, with author recorded. audience: '*' (all), a role name "
+                             "or an owner name. Use for directives and post-hoc notices; never for the "
+                             "worker's anchor.")
+    def gba_message(id: str, text: str, audience: str = "*") -> str:
+        def run(conn):
+            core.message(conn, id, author="conductor", text=text,
+                         audience=audience or "*")
+            return render.render_message(id, audience or "*")
+        return guard("gba_message", {"id": id, "text": text,
+                                     "audience": audience}, run)
+
+    @server.tool(description="GOVERNANCE (gb conductor only). Project facts store: small volatile truths "
+                             "(server ports, URIs, machine lists) injected at every gb_pull. action: "
+                             "set|remove|list. Static context belongs in init artifacts, not facts.")
+    def gba_fact(action: str = "list", key: str = "", value: str = "") -> str:
+        def run(conn):
+            if action == "set":
+                core.fact_set(conn, key, value, by="conductor")
+                return render.render_fact_set(key.strip())
+            if action == "remove":
+                core.fact_remove(conn, key, by="conductor")
+                return render.render_fact_remove(key.strip())
+            if action == "list":
+                return render.render_facts(core.facts(conn))
+            raise core.GbError(f"action must be set|remove|list, got {action!r}")
+        return guard("gba_fact", {"action": action, "key": key,
+                                  "value": value}, run)
+
+    @server.tool(description="GOVERNANCE (gb conductor only). Reopen a terminal node (done|rejected|"
+                             "canceled) back to pending when the world changed after it was closed "
+                             "(result invalidated, external process died). Anchor note preserved; the "
+                             "repair is recorded in events.")
+    def gba_reopen(id: str, reason: str = "") -> str:
+        def run(conn):
+            node = core.status(conn, id)["node"]
+            core.reopen(conn, id, reason=reason)
+            return render.render_reopen(id, node["state"])
+        return guard("gba_reopen", {"id": id, "reason": reason}, run)
+
+    @server.tool(description="GOVERNANCE (gb conductor only). Archive terminal node(s) to cold storage: "
+                             "hidden from all live views (pull/query/status), restorable. under=true "
+                             "archives the whole subtree; refused atomically if any member is "
+                             "non-terminal.")
+    def gba_archive(id: str, under: bool = False) -> str:
+        def run(conn):
+            count = core.archive(conn, id, under=under)
+            return render.render_archive(id, count)
+        return guard("gba_archive", {"id": id, "under": under}, run)
+
+    @server.tool(description="GOVERNANCE (gb conductor only). Restore an archived node to live views "
+                             "(state unchanged; combine with gba_reopen to resume closed work).")
+    def gba_restore(id: str) -> str:
+        def run(conn):
+            core.restore(conn, id)
+            return render.render_restore(id)
+        return guard("gba_restore", {"id": id}, run)
+
+    @server.tool(description="GOVERNANCE (gb conductor only). Atomically replace one node with another: "
+                             "old (proposed|pending) is canceled with superseded_by recorded, new "
+                             "(proposed) is approved in the same operation. One intent, one audit trail.")
+    def gba_supersede(old_id: str, new_id: str, reason: str = "") -> str:
+        def run(conn):
+            result = core.supersede(conn, old_id, new_id, reason=reason)
+            return render.render_supersede(result)
+        return guard("gba_supersede", {"old_id": old_id, "new_id": new_id,
+                                       "reason": reason}, run)
 
     @server.tool(description="GOVERNANCE (gb conductor only). Create the board if missing. "
                              "template: minimal|rd-classic|experiment|branching.")
@@ -139,21 +221,35 @@ def register(server, infra):
                                            "force": force}, run)
 
     @server.tool(description="GOVERNANCE (gb conductor only). Dump the whole graph as markdown "
-                             "(counts, nodes by state).")
-    def gba_export() -> str:
+                             "(counts, facts, nodes by state). include_archived=true also lists "
+                             "archived nodes.")
+    def gba_export(include_archived: bool = False) -> str:
         def run(conn):
             overview = core.status(conn)
             lines = ["counts: " + ", ".join(f"{k}: {v}"
-                                             for k, v in overview["counts"].items())]
+                                              for k, v in overview["counts"].items())]
+            if overview.get("facts"):
+                lines.append("facts:")
+                lines.extend(f"  - {f['key']}: {f['value']}"
+                             for f in overview["facts"])
             for state in STATES:
                 rows = conn.execute(
-                    "SELECT id, type, owner, spec FROM nodes WHERE state=? "
-                    "ORDER BY created_at, rowid", (state,)).fetchall()
+                    "SELECT id, type, owner, spec FROM nodes "
+                    "WHERE state=? AND archived=0 "
+                    "ORDER BY priority ASC, created_at, rowid", (state,)).fetchall()
                 if not rows:
                     continue
                 lines.append(f"{state}:")
                 for r in rows:
                     owner = f" [{r['owner']}]" if r["owner"] else ""
                     lines.append(f"  - {r['id']} ({r['type']}){owner} {r['spec']}")
+            if include_archived:
+                rows = conn.execute(
+                    "SELECT id, type, state, spec FROM nodes WHERE archived=1 "
+                    "ORDER BY created_at, rowid").fetchall()
+                if rows:
+                    lines.append("archived:")
+                    lines.extend(f"  - {r['id']} ({r['type']}, {r['state']}) {r['spec']}"
+                                 for r in rows)
             return "\n".join(lines)
-        return guard("gba_export", {}, run)
+        return guard("gba_export", {"include_archived": include_archived}, run)

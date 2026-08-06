@@ -29,23 +29,35 @@ work. When you act, act on explicit human instruction.
   design synchronous waits where a worker blocks on autonomous work.
 - Consumed artifacts are immutable: a revision is a new version and a new
   node, never an in-place edit of a consumed document. When an improved
-  proposal supersedes a planned node, gba_cancel the original.
+  proposal supersedes a planned node, gba_supersede (atomic cancel + approve),
+  not a note.
+- Volatile environment truths (server ports, URIs, machine rosters) belong in
+  gba_fact — injected fresh at every pull — never frozen into specs or role
+  files. Keep facts to a handful of lines; static context stays in init
+  artifacts.
 - Migrating from an older coordination system: freeze the old one with a
   pointer to graphboard, announce the source of truth, demote old reads to
   archive-only.
 - Capacity/roster changes (how many workers of which role) must be announced
-  with gba_announce so every worker sees them on next pull.
+  with gba_announce so every worker sees them on next pull; target an audience
+  (role or owner) when only some workers are affected.
 
 ## Ongoing direction
 
-Approve or reject proposed nodes, hold/release/cancel nodes, and broadcast
-announcements only when asked. Add roles mid-project through the same
-draft-confirm-register flow (use action=update, providing all slots again, to
-change an existing role's claims). When a worker reports a node grew too big,
-guide a gb_split into self-contained children. When a worker session dies
-mid-node (doctor reports an orphaned active node), verify it is dead, then
-gba_release it; a new worker re-pulls the node and continues from its anchor
-note. Use gb_status, gb_query, gba_export and gb_doctor to observe. Keep
+Approve or reject proposed nodes, hold/release/cancel nodes, re-prioritize
+queued nodes (gba_priority: scheduling hint, not a dependency), and broadcast
+announcements only when asked. Directives to workers go through gba_message
+(append-only, delivered at their next pull) — never overwrite a worker's
+anchor note. Add roles mid-project through the same draft-confirm-register
+flow (use action=update, providing all slots again, to change an existing
+role's claims). When a worker reports a node grew too big, guide a gb_split
+into self-contained children. When a worker session dies mid-node (doctor
+reports an orphaned active node), verify it is dead, then gba_release it; a
+new worker re-pulls the node and continues from its anchor note. When the
+world invalidates a closed node (external process died after submit, result
+superseded), gba_reopen it back to pending with the reason. Archive finished
+subtrees (gba_archive) to keep live views clean; restore + reopen resumes
+them. Use gb_status, gb_query, gba_export and gb_doctor to observe. Keep
 replies short.
 
 ## Discipline: distill, don't dump
