@@ -68,7 +68,7 @@ def register(server, infra):
 
     @server.tool(description="GOVERNANCE (gb conductor only). Append a directed message to a node (any "
                              "state, including done): delivered to matching agents at their next "
-                             "gb_pull/gb_status, with author recorded. audience: '*' (all), a role name "
+                             "gb_pull or gb_status(id, owner=<you>). audience: '*' (all), a role name "
                              "or an owner name. Use for directives and post-hoc notices; never for the "
                              "worker's anchor.")
     def gba_message(id: str, text: str, audience: str = "*") -> str:
@@ -79,10 +79,8 @@ def register(server, infra):
         return guard("gba_message", {"id": id, "text": text,
                                      "audience": audience}, run)
 
-    @server.tool(description="GOVERNANCE (gb conductor only). Project facts store: small volatile truths "
-                             "(server ports, URIs, machine lists). NOT injected at pull - workers query "
-                             "when needed; broadcast critical changes via gba_announce. action: "
-                             "set|remove|list. Static context belongs in init artifacts, not facts.")
+    @server.tool(description="GOVERNANCE (gb conductor only). Facts store WRITE control. Reading is open "
+                             "to all roles via gb_fact. action: set|remove|list.")
     def gba_fact(action: str = "list", key: str = "", value: str = "") -> str:
         def run(conn):
             if action == "set":

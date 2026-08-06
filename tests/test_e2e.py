@@ -344,3 +344,22 @@ def test_charter_baked_into_generated_role(tmp_path, capsys):
     assert conn.execute("SELECT summary FROM nodes WHERE id=?",
                         (nid,)).fetchone()[0] == "tight card face"
     conn.close()
+
+
+def test_semicolon_in_spec_survives_via_list(tmp_path, capsys):
+    board = init_proj(tmp_path, "semi", "rd-classic")
+    run(board, "propose", "--type", "proposal", "--spec", "root")
+    p = node_by_type(board, "proposal", "proposed")
+    run(board, "approve", p)
+    run(board, "pull", "--owner", "design-a")
+    capsys.readouterr()
+    spec_with_semi = "run training; then collect metrics; rsync out"
+    run(board, "submit", p, "--owner", "design-a", "--status", "done",
+        "--output", "out/p.md", "--succ", f"implementation|{spec_with_semi}")
+    i1 = node_by_type(board, "implementation", "proposed")
+    run(board, "approve", i1)
+    conn = db.connect(f"{board}/graph.db")
+    spec = conn.execute("SELECT spec FROM nodes WHERE id=?",
+                        (i1,)).fetchone()[0]
+    conn.close()
+    assert spec == spec_with_semi

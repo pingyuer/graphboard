@@ -15,7 +15,7 @@ INSTRUCTIONS = """graphboard coordinates work as a task graph; injection stays t
 2 Everything else is on demand: gb_status id=<node> for the full spec/outputs/messages, gb_query to find related nodes, gb_fact for environment facts. Never roam the board; never preload.
 3 Track progress with gb_note (your own nodes only - the anchor is owner-writable); finish with gb_submit (declare successors when the workflow expects them). If a node grows too big, gb_split it into self-contained children.
 4 If lost, after a session restart or context compaction: gb_status with your owner name first (shows your active/running nodes); gb_doctor checks board health.
-5 Approval, announcements, messages, facts, the charter, roles and the grammar belong to the gb conductor role and the human; never act beyond the current node."""
+5 Approval, announcements, messages, facts, the charter, roles, grammar and the queue order belong to the gb conductor role and the human. Never reorder the queue or change priorities; if asked, decline and route the requester to the conductor. Never act beyond the current node."""
 
 
 def _resolve_board_dir():

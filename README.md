@@ -161,11 +161,15 @@ agent 是连续行为体（像跟进项目的员工），MCP 只做"现在在做
   永不覆盖锚点。
 - **受众过滤**：`audience` 可以是 `*`（全体）、角色名（如 experimenter）或 owner
   全名。announce 与 message 都只在受众匹配时投递。
-- **facts 层**：`gba_fact` 存少量易变事实（端口、URI、机器清单）。**查询式、按需
-  取**（不在 pull 注入）；关键变更用 `gba_announce` 广播。别把环境事实冻进 spec
-  或角色文件。
+- **facts 读开放、写治理**：`gb_fact`（全员只读）查少量易变事实（端口、URI、机器
+  清单），`gba_fact`（仅 conductor）管理写。**查询式、按需取**（不在 pull 注入）；
+  关键变更用 `gba_announce` 广播。别把环境事实冻进 spec 或角色文件。
 - **认领可撤销**：误 pull / 依赖未就绪，worker 用 `gb_release` 把自己的 active
-  节点放回 pending（保锚点）——认领很轻，放回去也一样轻。
+  节点放回 pending（保锚点）——认领很轻，放回去也一样轻。放回后如实上报、停手
+  等待，不反复拉同一节点空转。
+- **消息投递/检视分语义**：`gb_status(id)` 是**检视**（全量消息、不消读，conductor/
+  诊断用）；`gb_status(id, owner=<你>)` 是**投递**（按受众过滤 + 标记已读，worker
+  收信）。`gba_message` 承诺在 gb_pull 或带 owner 的 gb_status 送达。
 - **自我视图**：`gb_status` 传 owner 时优先列出本人 active/running 节点（含锚点），
   会话死亡重开 = 一次确定性的重定位。
 - **文法**：`transitions.yaml`，结构化编辑（写前 `gb grammar check` 校验，非法拒绝落盘）。
@@ -183,12 +187,16 @@ agent 是连续行为体（像跟进项目的员工），MCP 只做"现在在做
 
 | 命名空间 | 工具 | 谁可用 |
 |---|---|---|
-| `gb_*` 工作 | pull / release / submit / split / delegate / reactivate / propose / note / status / query / doctor | 全体角色 |
+| `gb_*` 工作 | pull / release / submit / split / delegate / reactivate / propose / note / status / query / fact / doctor | 全体角色 |
 | `gba_*` 治理 | approve / reject / release / cancel / hold / announce / priority / message / fact / charter / summary / reopen / archive / restore / supersede / role / grammar / bootstrap / export | 仅 gb |
 
 `gb init` 生成的 opencode.json 里 `gba_*` 全局禁用、gb 覆盖启用——之后生成的
 任何新角色自动无权，零维护保住权力边界。控制面文件（`.board/`、角色文件、
 opencode.json）对所有 agent 的文件编辑工具**硬 deny**，只能经 MCP 工具合法修改。
+
+**队列顺序只属于 human/conductor**：worker 不得重排、改优先级或跳过节点；被要求
+时拒绝并请对方去问 gb conductor（`gba_hold`/`gba_priority` 是唯一合法调度通道）。
+用户对顺序的试错尝试是正常使用的一部分，边界清晰即可，不做额外机制。
 
 ## 项目结构（gb init 产物，全部自包含）
 
@@ -350,7 +358,7 @@ graphboard/
 ## 测试
 
 ```bash
-python3 -m pytest tests/ -q   # 165 tests：竞态认领/批内定序/裁决矩阵/文法检查
+python3 -m pytest tests/ -q   # 170 tests：竞态认领/批内定序/裁决矩阵/文法检查
                               # （swap/闭环/自动声明）/query/split/委托执行
                               # （delegate/收割/reactivate）/cancel/hold/TTL/
                               # schema 迁移/release 接管/角色生成与更新/治理工具/
@@ -362,5 +370,8 @@ python3 -m pytest tests/ -q   # 165 tests：竞态认领/批内定序/裁决矩�
                               # 节点一等公民：summary（显式/兜底/修复/卡面渲染）、
                               # charter（烙进角色 Background+contract）、pull 薄注入
                               # （只 summary，无全文 spec/contract/facts）
+                              # 交互卫生：successors/outputs/children 走 list（spec 内
+                              # `;` 不截断）、gb_fact 只读开放、status 投递/检视语义、
+                              # 承诺=工具面（INSTRUCTIONS/模板无漂移）、`;` 回归 e2e
                               # + e2e 换机事故剧本
 ```

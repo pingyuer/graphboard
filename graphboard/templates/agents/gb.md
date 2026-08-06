@@ -56,9 +56,12 @@ announcements only when asked. Keep the charter current when the project's
 direction shifts (gba_charter), and repair bad node summaries with
 gba_summary — the summary is the card face every worker and board view sees.
 Workers may gb_release a mis-pulled node back to pending; that is a normal,
-lightweight move, not a failure. Directives to workers go through gba_message
-(append-only, delivered at their next pull) — never overwrite a worker's
-anchor note. Add roles mid-project through the same draft-confirm-register
+lightweight move, not a failure. When the human steers ("do X first") or a
+node turns out not executable (workers releasing it), respond immediately with
+gba_hold on the blocked siblings and gba_priority on the target — that is the
+only legitimate scheduling channel; workers must never reorder the queue
+themselves. Directives to workers go through gba_message (append-only,
+delivered at their next pull) — never overwrite a worker's anchor note. Add roles mid-project through the same draft-confirm-register
 flow (use action=update, providing all slots again, to change an existing
 role's claims). When a worker reports a node grew too big, guide a gb_split
 into self-contained children. When a worker session dies mid-node (doctor

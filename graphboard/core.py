@@ -47,13 +47,12 @@ def new_id(conn):
     raise GbError("failed to allocate unique node id")
 
 
-def parse_outputs(spec):
-    if isinstance(spec, str):
-        parts = [p for p in spec.split(";") if p.strip()]
-    else:
-        parts = spec or ()
+def parse_outputs(parts):
+    if isinstance(parts, str):
+        raise GbError("outputs must be a list of PATH[:NOTE] entries, "
+                      "not a ';'-joined string (specs may contain ';')")
     outputs = []
-    for part in parts:
+    for part in parts or ():
         path, _, note = str(part).partition(":")
         if not path.strip():
             raise GbError(f"output entry must be PATH[:NOTE], got {part!r}")
@@ -61,13 +60,12 @@ def parse_outputs(spec):
     return outputs
 
 
-def parse_successors(spec):
-    if isinstance(spec, str):
-        parts = [p for p in spec.split(";") if p.strip()]
-    else:
-        parts = spec or ()
+def parse_successors(parts):
+    if isinstance(parts, str):
+        raise GbError("successors/children must be a list of TYPE|SPEC entries, "
+                      "not a ';'-joined string (specs may contain ';')")
     succs = []
-    for part in parts:
+    for part in parts or ():
         stype, sep, sspec = str(part).partition("|")
         if not sep or not sspec.strip():
             raise GbError(f"successor/child entry must be TYPE|SPEC, got {part!r}")
@@ -498,10 +496,16 @@ def status(conn, node_id=None, owner=None):
         outputs = [dict(r) for r in conn.execute(
             "SELECT path, note, created_at FROM outputs WHERE node_id=? "
             "ORDER BY created_at", (node_id,)).fetchall()]
-        messages = [dict(r) for r in conn.execute(
-            "SELECT author, audience, text, created_at FROM messages "
-            "WHERE node_id=? ORDER BY id DESC LIMIT 10", (node_id,)).fetchall()]
-        messages.reverse()
+        if owner:
+            # delivery: audience-filtered, marked read (the worker's mailbox)
+            messages = _unread_messages(conn, node_id, owner)
+            conn.commit()
+        else:
+            # inspection: everything, never marked read
+            messages = [dict(r) for r in conn.execute(
+                "SELECT author, audience, text, created_at FROM messages "
+                "WHERE node_id=? ORDER BY id DESC LIMIT 10", (node_id,)).fetchall()]
+            messages.reverse()
         return {"node": dict(node), "parent": parent,
                 "children": children, "outputs": outputs, "messages": messages}
     counts = {}

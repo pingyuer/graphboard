@@ -383,17 +383,21 @@ def test_submit_done_error_teaches_fallback(conn):
 
 
 def test_parse_shared_helpers():
-    assert core.parse_outputs("a.md:note;b.md") == [
-        {"path": "a.md", "note": "note"}, {"path": "b.md", "note": None}]
     assert core.parse_outputs(["a.md:note", "b.md"]) == [
         {"path": "a.md", "note": "note"}, {"path": "b.md", "note": None}]
-    assert core.parse_outputs("") == []
-    assert core.parse_successors("t|do it;u|and this") == [
-        {"type": "t", "spec": "do it"}, {"type": "u", "spec": "and this"}]
+    assert core.parse_outputs([]) == []
+    assert core.parse_successors(["t|do it;and keep the ; inside",
+                                  "u|and this"]) == [
+        {"type": "t", "spec": "do it;and keep the ; inside"},
+        {"type": "u", "spec": "and this"}]
     with pytest.raises(core.GbError, match="TYPE\\|SPEC"):
-        core.parse_successors("broken")
+        core.parse_successors(["broken"])
     with pytest.raises(core.GbError, match="PATH"):
-        core.parse_outputs(":no-path")
+        core.parse_outputs([":no-path"])
+    with pytest.raises(core.GbError, match="not a ';'-joined"):
+        core.parse_successors("t|do it;u|and this")
+    with pytest.raises(core.GbError, match="not a ';'-joined"):
+        core.parse_outputs("a.md;b.md")
 
 
 def test_pull_reports_awaiting_approval(conn):
@@ -999,3 +1003,22 @@ def test_msg_count_attached_to_query_and_status(conn):
     assert q[0]["msg_count"] == 1
     s = core.status(conn)["open"]
     assert [n for n in s if n["id"] == nid][0]["msg_count"] == 1
+
+
+def test_status_delivery_marks_read_filters_audience(conn):
+    nid = core.propose(conn, "task", "s")
+    core.approve(conn, nid)
+    core.message(conn, nid, author="conductor", text="for impl",
+                 audience="impl")
+    core.message(conn, nid, author="conductor", text="for all")
+    s = core.status(conn, nid)
+    assert len(s["messages"]) == 2
+    assert conn.execute("SELECT COUNT(*) c FROM message_reads"
+                        ).fetchone()["c"] == 0
+    s2 = core.status(conn, nid, owner="impl-a")
+    texts = [m["text"] for m in s2["messages"]]
+    assert "for impl" in texts and "for all" in texts
+    assert conn.execute("SELECT COUNT(*) c FROM message_reads WHERE "
+                        "recipient='impl-a'").fetchone()["c"] == 2
+    s3 = core.status(conn, nid, owner="impl-a")
+    assert s3["messages"] == []

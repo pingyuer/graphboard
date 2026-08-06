@@ -48,8 +48,8 @@ def test_mcp_full_chain(env):
 
     text = call(server, "gb_submit", {
         "id": nid, "owner": "p", "status": "done",
-        "outputs": "out/p.md:v1",
-        "successors": "implementation|build it"})
+        "outputs": ["out/p.md:v1"],
+        "successors": ["implementation|build it"]})
     assert "-> proposed [grammar approve]" in text
 
     conn = db.connect(board / "graph.db")
@@ -64,8 +64,8 @@ def test_mcp_full_chain(env):
 
     text = call(server, "gb_submit", {
         "id": impl, "owner": "i", "status": "done",
-        "outputs": "out/code.py",
-        "successors": "acceptance|verify"})
+        "outputs": ["out/code.py"],
+        "successors": ["acceptance|verify"]})
     assert "-> pending [grammar auto]" in text
 
     call(server, "gb_pull", {"owner": "a"})
@@ -207,7 +207,7 @@ def test_mcp_split_roundtrip(env):
     assert "claimed" in call(server, "gb_pull", {"owner": "arch-a"})
     text = call(server, "gb_split", {
         "id": plan, "owner": "arch-a",
-        "children": "task|part one;task|part two"})
+        "children": ["task|part one", "task|part two"]})
     assert "split -> blocked" in text
     import re as _re
     kids = _re.findall(r"child: (\S+)", text)
@@ -224,7 +224,7 @@ def test_mcp_split_roundtrip(env):
         conn.close()
         assert row is not None
         return call(server, "gb_submit", {"id": row["id"], "owner": row["owner"],
-                                          "status": "done", "outputs": "out/x"})
+                                          "status": "done", "outputs": ["out/x"]})
 
     claim_and_submit()
     text = claim_and_submit()
@@ -244,7 +244,7 @@ def test_mcp_release_reattach_flow(env):
     text = call(server, "gb_pull", {"owner": "w-b"})
     assert f"claimed: {nid}" in text and "tmux: n-x on srv1" in text
     text = call(server, "gb_submit", {"id": nid, "owner": "w-b",
-                                      "status": "done", "outputs": "out/x"})
+                                      "status": "done", "outputs": ["out/x"]})
     assert "done" in text
 
 
@@ -300,8 +300,8 @@ def test_mcp_tool_surface(env):
     names = sorted(t.name for t in tools)
     assert names == sorted([
         "gb_pull", "gb_release", "gb_submit", "gb_split", "gb_delegate",
-        "gb_reactivate", "gb_propose", "gb_status", "gb_query", "gb_note",
-        "gb_doctor",
+        "gb_reactivate", "gb_propose", "gb_status", "gb_query", "gb_fact",
+        "gb_note", "gb_doctor",
         "gba_approve", "gba_release", "gba_cancel", "gba_hold", "gba_announce",
         "gba_priority", "gba_message", "gba_fact", "gba_charter", "gba_summary",
         "gba_reopen", "gba_archive", "gba_restore", "gba_supersede",
@@ -397,13 +397,13 @@ def test_mcp_repair_reopen_archive_supersede(env):
     nid = _claim(server)
     call(server, "gb_pull", {"owner": "w"})
     call(server, "gb_submit", {"id": nid, "owner": "w", "status": "done",
-                               "outputs": "out/x"})
+                               "outputs": ["out/x"]})
     text = call(server, "gba_reopen", {"id": nid, "reason": "world changed"})
     assert "reopened" in text and "pending" in text
     text = call(server, "gb_pull", {"owner": "w2"})
     assert f"claimed: {nid}" in text
     call(server, "gb_submit", {"id": nid, "owner": "w2", "status": "done",
-                               "outputs": "out/y"})
+                               "outputs": ["out/y"]})
     text = call(server, "gba_archive", {"id": nid})
     assert "archived" in text
     text = call(server, "gb_query", {"state": "done"})
@@ -481,3 +481,60 @@ def test_mcp_charter_baked_into_role(env):
     content = (repo / ".opencode" / "agents" / "runner.md").read_text()
     assert "Background" in content
     assert "Reproduce paper X on ACDC." in content
+
+
+def test_mcp_gb_fact_read_for_workers(env):
+    server, _, _ = env
+    call(server, "gba_fact", {"action": "set", "key": "mlflow_uri",
+                              "value": "http://172.16.240.77:5000"})
+    text = call(server, "gb_fact", {})
+    assert "mlflow_uri: http://172.16.240.77:5000" in text
+    text = call(server, "gb_fact", {"key": "mlflow_uri"})
+    assert "mlflow_uri" in text
+    text = call(server, "gb_fact", {"key": "nope"})
+    assert "no facts" in text
+
+
+def test_mcp_status_delivery_vs_inspection(env):
+    server, board, _ = env
+    nid = _claim(server)
+    call(server, "gba_message", {"id": nid, "text": "for impl only",
+                                 "audience": "impl"})
+    call(server, "gba_message", {"id": nid, "text": "for review only",
+                                 "audience": "review"})
+    # inspection: no owner -> everything shown, nothing marked read
+    text = call(server, "gb_status", {"id": nid})
+    assert "for impl only" in text and "for review only" in text
+    conn = db.connect(board / "graph.db")
+    assert conn.execute("SELECT COUNT(*) c FROM message_reads").fetchone()["c"] == 0
+    conn.close()
+    # delivery: owner -> audience-filtered and marked read
+    text = call(server, "gb_status", {"id": nid, "owner": "impl-a"})
+    assert "for impl only" in text and "for review only" not in text
+    conn = db.connect(board / "graph.db")
+    assert conn.execute("SELECT COUNT(*) c FROM message_reads WHERE "
+                        "recipient='impl-a'").fetchone()["c"] == 1
+    conn.close()
+    # delivered messages no longer reappear for that owner
+    text = call(server, "gb_status", {"id": nid, "owner": "impl-a"})
+    assert "for impl only" not in text
+
+
+def test_promises_match_tool_surface():
+    import re
+    import graphboard.server as srv
+    import asyncio
+    tools = {t.name for t in asyncio.run(srv.server.list_tools())}
+    sources = [
+        srv.INSTRUCTIONS,
+        (srv.__file__.rsplit("/", 1)[0]
+         + "/templates/AGENTS.md.tpl"),
+        (srv.__file__.rsplit("/", 1)[0] + "/templates/agents/gb.md"),
+        (srv.__file__.rsplit("/", 1)[0] + "/templates/ROLE_PARADIGM.md.tpl"),
+    ]
+    mentioned = set()
+    for src in sources:
+        text = src if isinstance(src, str) else open(src).read()
+        mentioned |= set(re.findall(r"\b(gb_[a-z_]+|gba_[a-z_]+)\b", text))
+    missing = sorted(mentioned - tools)
+    assert not missing, f"promises without tools: {missing}"

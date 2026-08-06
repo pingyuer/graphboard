@@ -4,10 +4,9 @@ from . import core, doctor, render
 def register(server, infra):
     guard = infra.guard
 
-    @server.tool(description="Claim the next pending node. Thin injection: you get the card face - "
-                             "summary, anchor, inputs paths, and fresh messages/announcements. "
-                             "Your role file already carries the project background; fetch the full "
-                             "spec/outputs on demand via gb_status. Wrong node? gb_release it back.")
+    @server.tool(description="Claim the next pending node. Returns the card face only: summary, anchor, "
+                             "inputs paths, fresh messages/announcements. Full spec via gb_status; wrong "
+                             "node? gb_release it back.")
     def gb_pull(owner: str, type: str = "") -> str:
         def run(conn):
             result = core.pull(conn, owner, type_filter=type or None)
@@ -28,11 +27,11 @@ def register(server, infra):
         return guard("gb_release", {"id": id, "owner": owner, "reason": reason}, run)
 
     @server.tool(description="Finish the active node, or harvest a running one. status: done|blocked; "
-                             "event overrides the grammar event (default: status). outputs: PATH[:NOTE];PATH. "
-                             "successors: TYPE|SPEC;TYPE|SPEC (grammar decides auto vs approval). "
-                             "Declare every successor the workflow expects.")
+                             "event overrides the grammar event (default: status). outputs: list of "
+                             "PATH[:NOTE]. successors: list of TYPE|SPEC - each spec is free text "
+                             "(may contain any characters). Declare every successor the workflow expects.")
     def gb_submit(id: str, owner: str, status: str, event: str = "", note: str = "",
-                  outputs: str = "", successors: str = "") -> str:
+                  outputs: list[str] = [], successors: list[str] = []) -> str:
         def run(conn):
             grammar, _ = infra.grammar_and_contracts()
             result = core.submit(conn, id, owner=owner, status=status,
@@ -70,10 +69,9 @@ def register(server, infra):
         return guard("gb_reactivate", {"id": id, "owner": owner}, run)
 
     @server.tool(description="Split an active node into smaller children when the work grew too big. "
-                             "children: TYPE|SPEC;TYPE|SPEC. The node becomes blocked and unowned; when "
-                             "all children are done it returns to pending for integration. Each child "
-                             "spec must be self-contained for a fresh session.")
-    def gb_split(id: str, owner: str, children: str) -> str:
+                             "children: list of TYPE|SPEC; each spec is free text. The node becomes "
+                             "blocked and unowned; when all children are done it returns to pending.")
+    def gb_split(id: str, owner: str, children: list[str]) -> str:
         def run(conn):
             grammar, _ = infra.grammar_and_contracts()
             result = core.split(conn, id, owner=owner,
@@ -93,10 +91,11 @@ def register(server, infra):
         return guard("gb_propose", {"type": type, "spec": spec, "parent": parent,
                                     "summary": summary}, run)
 
-    @server.tool(description="The on-demand context tool. With id: one node's FULL spec, summary, lineage, "
-                             "children, outputs, messages - pull only injects the summary, come here for "
-                             "the rest. Without id: board overview; pass your owner name to see your own "
-                             "active/running nodes first after a session restart or context compaction.")
+    @server.tool(description="On-demand context. With id: full spec, summary, lineage, outputs. "
+                             "Inspection vs delivery: gb_status(id) shows all messages without marking "
+                             "read; gb_status(id, owner=<you>) delivers your mailbox (audience-filtered, "
+                             "marked read). Without id: board overview; with owner: your active/running "
+                             "nodes first.")
     def gb_status(id: str = "", owner: str = "") -> str:
         def run(conn):
             result = core.status(conn, id or None, owner=owner or None)
@@ -115,6 +114,17 @@ def register(server, infra):
             return render.render_query(result)
         return guard("gb_query", {"type": type, "state": state, "under": under,
                                   "owner": owner, "limit": limit}, run)
+
+    @server.tool(description="Read current environment facts (server ports, URIs). key: optional "
+                             "single fact name; empty returns all. Facts are query-only for workers; "
+                             "the conductor manages them via gba_fact.")
+    def gb_fact(key: str = "") -> str:
+        def run(conn):
+            rows = core.facts(conn)
+            if key:
+                rows = [f for f in rows if f["key"] == key.strip()]
+            return render.render_facts(rows)
+        return guard("gb_fact", {"key": key}, run)
 
     @server.tool(description="Replace the anchor note on a node you own (current position, progress, "
                              "sync point). Pass your owner name; anchors are owner-writable. Directives "
