@@ -186,6 +186,8 @@ def register(server, infra):
             if action not in ("register", "update"):
                 raise core.GbError(f"action must be register|update, got {action!r}")
             charter, contracts = roles.collect_role_context(board_dir, claim_list)
+            from .hosts import get_adapter
+            adapter = get_adapter("auto", repo=repo)
             content = roles.render_role(
                 name=name, description=description, claims=claim_list,
                 duties=duties or "Work the claimed node according to its spec and contract.",
@@ -194,8 +196,9 @@ def register(server, infra):
                                    "pathspec before submit); coordination artifacts go to the workdir.",
                 done_when=done_when or "The node spec's completion criteria are met and outputs are submitted.",
                 background=(background or "").strip() or charter,
-                contracts=contracts)
-            path = roles.write_role(repo, name, content, force=(action == "update"))
+                contracts=contracts,
+                host=adapter.name)
+            path = roles.write_role(repo, name, content, force=(action == "update"), host=adapter.name)
             added = roles.ensure_nodetypes(board_dir, claim_list, description)
             lines = [f"role {'updated' if action == 'update' else 'registered'}: {path}"]
             if added:

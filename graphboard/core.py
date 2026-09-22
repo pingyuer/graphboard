@@ -15,13 +15,45 @@ class GbError(Exception):
     pass
 
 
+_HEADER_CLEAN_RE = re.compile(r"^#+\s*")
+_BOILERPLATE_KEYWORDS = r"(?:项目背景|背景|上下文|概述|目标|任务|context|background|overview|objective|task\s*\d*)"
+_BOILERPLATE_CONNECTORS = r"(?:\s*(?:&|and|与|和|/)\s*" + _BOILERPLATE_KEYWORDS + r")*"
+_BOILERPLATE_LINE_RE = re.compile(
+    r"^(#+|\*\*|\[|\()? *" + _BOILERPLATE_KEYWORDS + _BOILERPLATE_CONNECTORS + r" *(:|：|\*\*|\]|\))? *$",
+    re.IGNORECASE,
+)
+_BOILERPLATE_PREFIX_RE = re.compile(
+    r"^(?:#+|\*\*|\[|\()? *" + _BOILERPLATE_KEYWORDS + _BOILERPLATE_CONNECTORS + r" *(?::|：|\*\*|\]|\))*\s*",
+    re.IGNORECASE,
+)
+
+
 def summary_of(spec):
     if not spec or not spec.strip():
         return ""
-    line = spec.strip().splitlines()[0].strip()
-    if len(line) > SUMMARY_MAX:
-        line = line[:SUMMARY_MAX].rstrip() + "…"
-    return line
+    lines = [l.strip() for l in spec.strip().splitlines() if l.strip()]
+    if not lines:
+        return ""
+
+    candidate = None
+    for raw in lines:
+        cleaned = _HEADER_CLEAN_RE.sub("", raw).strip()
+        cleaned = re.sub(r"^\*+|\*+$", "", cleaned).strip()
+        if not cleaned:
+            continue
+        if _BOILERPLATE_LINE_RE.match(cleaned):
+            continue
+        candidate = _BOILERPLATE_PREFIX_RE.sub("", cleaned).strip()
+        if candidate:
+            break
+
+    if not candidate:
+        candidate = _HEADER_CLEAN_RE.sub("", lines[0]).strip()
+        candidate = re.sub(r"^\*+|\*+$", "", candidate).strip()
+
+    if len(candidate) > SUMMARY_MAX:
+        candidate = candidate[:SUMMARY_MAX].rstrip() + "…"
+    return candidate
 
 
 def role_of(owner):

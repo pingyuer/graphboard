@@ -45,11 +45,16 @@ def open_board(args):
 
 def cmd_init(args):
     dir_ = args.dir or os.getcwd()
+    host = getattr(args, "host", "auto")
+    agents_arg = (args.agents or "").strip()
+    if agents_arg in ("", "none", "empty"):
+        agents = []
+    else:
+        agents = [a.strip() for a in agents_arg.split(",") if a.strip()] or ["gb"]
     try:
         result = scaffold.scaffold_project(
             dir_, name=args.name, template=args.template,
-            agents=[a.strip() for a in args.agents.split(",") if a.strip()] or ["gb"],
-            git=args.git, force=args.force)
+            agents=agents, git=args.git, force=args.force, host=host)
     except core.GbError as e:
         raise UsageError(str(e))
     print(f"initialized project '{result['project']}' at {result['repo']}")
@@ -58,10 +63,13 @@ def cmd_init(args):
     for action, path in result["agents"]:
         print(f"  agent {action}: {path}")
     print(f"  AGENTS.md: {result['agents_md']}")
-    print(f"  opencode.json: {result['config']}")
+    if result.get("host") == "omp":
+        print(f"  .mcp.json: {result['config']}")
+    else:
+        print(f"  opencode.json: {result['config']}")
     print(f"  git: {result['git']}")
-    print("\nnext: open opencode in this directory, switch to the gb role,")
-    print("and tell it what this project needs (roles, workflow, first node).")
+    adapter = scaffold.get_adapter(result.get("host", "auto"), repo=result["repo"])
+    print(f"\nnext: {adapter.next_steps(result['repo'])}")
     return 0
 
 
@@ -456,6 +464,8 @@ def build_parser():
                    help="grammar starter: minimal|rd-classic|experiment|branching")
     p.add_argument("--agents", default="gb",
                    help="comma-separated agent templates to install (default: gb only)")
+    p.add_argument("--host", choices=["auto", "opencode", "omp"], default="auto",
+                   help="target host AI environment: auto|opencode|omp (default: auto)")
     p.add_argument("--git", action="store_true", help="git init if not a repo")
     p.add_argument("--force", action="store_true")
     p.set_defaults(fn=cmd_init)

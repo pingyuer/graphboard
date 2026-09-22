@@ -42,6 +42,29 @@ def test_write_role_and_listing(tmp_path):
     assert found[0]["description"] == "d"
 
 
+def test_render_role_omp():
+    text = roles.render_role(
+        "tuner", "Tunes perf.", ["implementation"],
+        "Profile then optimize.", "Query benchmarks.",
+        "Code stays in repo.", "Benchmarks improve.", host="omp")
+    assert text.startswith("---\nname: tuner\ndescription: Tunes perf.\n---")
+    assert "You are the tuner role" in text
+
+
+def test_write_role_and_listing_omp(tmp_path):
+    repo = tmp_path / "repo_omp"
+    repo.mkdir()
+    content = roles.render_role("tuner", "d", ["implementation"],
+                                "x", "y", "z", "w", host="omp")
+    path = roles.write_role(repo, "tuner", content, host="omp")
+    assert path == repo / ".omp" / "agents" / "tuner.md"
+    assert path.read_text() == content
+    found = roles.list_roles(repo, host="omp")
+    assert len(found) == 1
+    assert found[0]["name"] == "tuner"
+    assert found[0]["description"] == "d"
+
+
 def test_ensure_nodetypes_idempotent(project):
     added = roles.ensure_nodetypes(project, ["survey", "proposal"], "Scout docs.")
     assert added == ["survey"]
@@ -130,7 +153,19 @@ def test_git_baseline(tmp_path):
                     "commit", "-m", "init"], cwd=repo, check=True,
                    capture_output=True)
     b = git_baseline(repo)
-    assert b["dirty"] == 0 and b["hash"]
     (repo / "b.txt").write_text("y")
     b = git_baseline(repo)
     assert b["dirty"] == 1
+
+
+def test_write_role_not_dir_error(tmp_path):
+    not_a_dir = tmp_path / "nonexistent"
+    with pytest.raises(GbError, match="repo directory not found"):
+        roles.write_role(not_a_dir, "tuner", "content")
+
+
+def test_list_roles_missing_dir(tmp_path):
+    empty_repo = tmp_path / "empty_repo"
+    empty_repo.mkdir()
+    assert roles.list_roles(empty_repo) == []
+

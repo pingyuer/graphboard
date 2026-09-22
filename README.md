@@ -56,9 +56,9 @@ agent 们也获得了同样干净的分离。
 ## 前置条件
 
 - **Python ≥ 3.10**
-- **opencode**——目前唯一适配的宿主：`gb init` 生成的是 opencode 的角色文件、
-  MCP 配置与权限门控。MCP 层本身是标准协议（其他客户端可手动接线），但脚手架
-  与治理门控暂不为其他宿主生成配置。
+- **宿主环境**：适配 **omp (oh-my-pi)** 与 **opencode**。
+  - **omp 模式**：`gb init --host omp` 生成根目录 `.mcp.json` 并安装中控角色至 `.omp/agents/gb.md`（检测到 `.omp/` 时自动生效）。
+  - **opencode 模式**：生成 `opencode.json` 权限门控配置与 `.opencode/agents/` 目录。
 - **git**（推荐）：项目版本化 + 多 agent 的提交纪律（显式 pathspec、
   `gb <node-id>:` 消息约定、危险 git 操作被权限闸门禁止）。
 - 联网（首次安装拉 `mcp`、`PyYAML` 两个依赖）。
@@ -94,8 +94,14 @@ gb init /tmp/smoke && gb --board /tmp/smoke/.board doctor   # 冒烟
 
 ```bash
 cd /path/to/project         # 任何目录，无需已有仓库
-gb init                     # 单步脚手架：.board/ + gb 角色 + AGENTS.md + opencode.json
-opencode                    # 开 opencode，Tab 切到 gb 角色
+
+# 使用 omp 宿主（推荐）:
+gb init --host omp          # 单步脚手架：.board/ + .omp/agents/gb.md + AGENTS.md + .mcp.json
+omp                         # 启动 omp，切换至中控角色 (/agent gb)
+
+# 或使用 opencode 宿主:
+gb init                     # 生成 .board/ + .opencode/agents/gb.md + opencode.json
+opencode                    # 启动 opencode，Tab 切到 gb 角色
 ```
 
 然后和 gb 对话，它是项目导演：
@@ -215,7 +221,8 @@ board 定位优先级：`--board` → `$GB_BOARD` → 从 cwd 向上找 `.board/
 ## 人类命令速查（CLI = 脚本/急救通道）
 
 ```bash
-gb init [dir] [--name N] [--template minimal|rd-classic|experiment|branching]
+gb init [dir] [--host omp|opencode|auto] [--name N]
+              [--template minimal|rd-classic|experiment|branching]
               [--agents gb,proposal,...] [--git] [--force]
 gb list [--state S] [--archived] / show <id> / export
 gb query --type T --state S --under <id> --owner O [--archived]

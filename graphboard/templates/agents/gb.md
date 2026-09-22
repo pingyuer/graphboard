@@ -30,6 +30,12 @@ work. When you act, act on explicit human instruction.
 
 ## Design constraints for workflows you create
 
+- Routine workflow execution should be autonomous: routine pipelines (e.g.
+  implementation -> test, or subtasks) should use activate: auto so workers
+  advance without pausing for human approval. Reserve activate: approve
+  strictly for major milestone gates (e.g. proposal -> implementation) and
+  circuit-breaker rework loops with budget (budget: 3). Avoid approval
+  bottlenecks for routine execution.
 - Workflows with long-running tasks MUST use the delegation pattern: the
   worker launches the work, gb_delegates it to running, and moves on. Never
   design synchronous waits where a worker blocks on autonomous work.

@@ -107,6 +107,30 @@ def test_mcp_gba_role(env):
     assert "node types added to nodetypes.yaml: survey" in text
 
 
+def test_mcp_gba_role_omp(tmp_path, monkeypatch):
+    proj = tmp_path / "omp_mcp_proj"
+    assert cli.main(["init", str(proj), "--host", "omp", "--name", "omp-mcp"]) == 0
+    monkeypatch.setenv("GB_BOARD", str(proj / ".board"))
+    monkeypatch.setenv("GB_PROJECT", "omp-mcp")
+    monkeypatch.setenv("GB_REPO", str(proj))
+    import graphboard.server as srv
+    srv._cache.clear()
+    text = call(srv.server, "gba_role", {
+        "name": "evaluator",
+        "description": "Evaluates outputs against criteria.",
+        "claims": "acceptance",
+        "duties": "Check output files.",
+    })
+    assert "role registered" in text
+    agent_path = proj / ".omp" / "agents" / "evaluator.md"
+    assert agent_path.exists()
+    content = agent_path.read_text(encoding="utf-8")
+    assert "name: evaluator" in content
+    assert "mode: primary" not in content
+    assert "You are the evaluator role" in content
+
+
+
 def test_mcp_gba_role_requires_repo(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     monkeypatch.setenv("GB_BOARD", str(proj / ".board"))

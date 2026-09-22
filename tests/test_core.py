@@ -337,6 +337,25 @@ def test_split_of_split_recursive(conn):
                         (plan,)).fetchone()["state"] == "blocked"
 
 
+def test_split_with_grammar_auto_activation(conn):
+    from graphboard.grammar import Grammar, Rule
+    g = Grammar(default="approve", rules=[
+        Rule(frm="plan", on="split", to="task", activate="auto")
+    ])
+    plan = core.propose(conn, "plan", "big plan")
+    core.approve(conn, plan)
+    core.pull(conn, owner="arch-a")
+    r = core.split(conn, plan, owner="arch-a", children=[
+        {"type": "task", "spec": "child a"},
+        {"type": "task", "spec": "child b"}],
+        grammar=g)
+    assert r["state"] == "blocked"
+    assert [c["state"] for c in r["children"]] == ["pending", "pending"]
+    # Worker can immediately claim child without manual approval
+    claimed = core.pull(conn, owner="worker-1")
+    assert claimed["claimed"]["id"] == r["children"][0]["id"]
+
+
 def test_split_validation(conn):
     plan = core.propose(conn, "plan", "big")
     core.approve(conn, plan)
@@ -936,6 +955,14 @@ def test_summary_explicit_and_fallback(conn):
     summ = conn.execute("SELECT summary FROM nodes WHERE id=?",
                         (trunc,)).fetchone()[0]
     assert summ.endswith("…") and len(summ) <= core.SUMMARY_MAX + 1
+
+
+def test_summary_of_smart_filtering():
+    assert core.summary_of("# 项目背景\n实现用户认证中间件\n详细说明...") == "实现用户认证中间件"
+    assert core.summary_of("## Background & Context\nFix memory leak in buffer pool") == "Fix memory leak in buffer pool"
+    assert core.summary_of("[背景] 重构 Redis 连接池") == "重构 Redis 连接池"
+    assert core.summary_of("**Context:** Update Dockerfile to multi-stage") == "Update Dockerfile to multi-stage"
+    assert core.summary_of("# Background") == "Background"
 
 
 def test_summary_of_successors_and_split(conn):

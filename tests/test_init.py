@@ -128,3 +128,74 @@ def test_gitignore_covers_node_modules(tmp_path):
     assert cli.main(["init", str(proj), "--git"]) == 0
     gi = (proj / ".gitignore").read_text()
     assert ".opencode/node_modules/" in gi
+
+
+def test_init_omp_host(tmp_path, capsys):
+    proj = tmp_path / "omp_proj"
+    code = cli.main(["init", str(proj), "--host", "omp", "--name", "omp-demo", "--git"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert ".mcp.json: wrote" in out
+    assert "talk to the gb conductor (/agent gb)" in out
+
+    board = proj / ".board"
+    assert (board / "graph.db").exists()
+
+    gb_agent = proj / ".omp" / "agents" / "gb.md"
+    assert gb_agent.exists()
+    gb_content = gb_agent.read_text(encoding="utf-8")
+    assert "name: gb" in gb_content
+    assert "mode: primary" not in gb_content
+
+    mcp_json = json.loads((proj / ".mcp.json").read_text(encoding="utf-8"))
+    srv = mcp_json["mcpServers"]["graphboard"]
+    assert srv["args"] == ["-m", "graphboard.server"]
+    assert srv["env"]["GB_PROJECT"] == "omp-demo"
+    assert srv["env"]["GB_BOARD"] == str(board)
+
+    gi = (proj / ".gitignore").read_text(encoding="utf-8")
+    assert ".omp/run/" in gi
+    assert ".omp/cache/" in gi
+
+
+def test_init_auto_detects_omp(tmp_path):
+    proj = tmp_path / "auto_omp"
+    (proj / ".omp").mkdir(parents=True)
+    assert cli.main(["init", str(proj)]) == 0
+    assert (proj / ".mcp.json").exists()
+    assert (proj / ".omp" / "agents" / "gb.md").exists()
+    assert not (proj / "opencode.json").exists()
+
+
+def test_init_empty_agents_omp(tmp_path):
+    proj = tmp_path / "empty_agents"
+    assert cli.main(["init", str(proj), "--host", "omp", "--agents", "none"]) == 0
+    agents_dir = proj / ".omp" / "agents"
+    assert agents_dir.exists()
+    assert list(agents_dir.glob("*.md")) == []
+
+
+def test_init_omp_existing_mcp_json_merged(tmp_path):
+    proj = tmp_path / "merge_omp"
+    proj.mkdir()
+    existing_mcp = {
+        "mcpServers": {
+            "sqlite": {"command": "uvx", "args": ["mcp-server-sqlite"]}
+        }
+    }
+    (proj / ".mcp.json").write_text(json.dumps(existing_mcp))
+    assert cli.main(["init", str(proj), "--host", "omp"]) == 0
+    config = json.loads((proj / ".mcp.json").read_text())
+    assert "sqlite" in config["mcpServers"]
+    assert "graphboard" in config["mcpServers"]
+
+
+def test_init_omp_corrupted_mcp_json_recovered(tmp_path):
+    proj = tmp_path / "corrupt_omp"
+    proj.mkdir()
+    (proj / ".mcp.json").write_text("{broken json")
+    assert cli.main(["init", str(proj), "--host", "omp"]) == 0
+    config = json.loads((proj / ".mcp.json").read_text())
+    assert "graphboard" in config["mcpServers"]
+
+

@@ -4,10 +4,11 @@ from pathlib import Path
 
 from .core import GbError
 from .grammar import declare_nodetype, load_nodetypes
+from .hosts import get_adapter
 
 
 def render_role(name, description, claims, duties, loading, outputs, done_when,
-                background="", contracts=None):
+                background="", contracts=None, host="opencode"):
     claims_line = ", ".join(claims) if isinstance(claims, (list, tuple)) else claims
     bg = ""
     if background and background.strip():
@@ -19,11 +20,9 @@ def render_role(name, description, claims, duties, loading, outputs, done_when,
         ct = ("Contracts of your node types:\n"
               + "\n".join(f"  - {t}: {c}" for t, c in contracts.items())
               + "\n\n")
-    return f"""---
-description: {description}
-mode: primary
----
-
+    adapter = get_adapter(host)
+    frontmatter = adapter.render_frontmatter(name, description)
+    return f"""{frontmatter}
 You are the {name} role.
 
 {bg}Claims: nodes of type {claims_line}.
@@ -61,13 +60,14 @@ def collect_role_context(board_dir, claims):
     return background, contracts
 
 
-def write_role(repo, name, content, force=False):
+def write_role(repo, name, content, force=False, host="auto"):
     if not re.fullmatch(r"[a-z][a-z0-9-]*", name):
         raise GbError(f"role name must be lowercase alphanumeric with hyphens: {name!r}")
     repo = Path(os.path.expanduser(str(repo)))
     if not repo.is_dir():
         raise GbError(f"repo directory not found: {repo}")
-    agents_dir = repo / ".opencode" / "agents"
+    adapter = get_adapter(host, repo=repo)
+    agents_dir = adapter.agents_dir(repo)
     agents_dir.mkdir(parents=True, exist_ok=True)
     dst = agents_dir / f"{name}.md"
     if dst.exists() and not force:
@@ -87,9 +87,12 @@ def suggest_grammar_rules(claims):
     return "suggested transitions to add to transitions.yaml:\n" + "\n".join(lines)
 
 
-def list_roles(repo):
+def list_roles(repo, host="auto"):
     repo = Path(os.path.expanduser(str(repo)))
-    agents_dir = repo / ".opencode" / "agents"
+    adapter = get_adapter(host, repo=repo)
+    agents_dir = adapter.agents_dir(repo)
+    if not agents_dir.exists():
+        return []
     roles = []
     for p in sorted(agents_dir.glob("*.md")):
         text = p.read_text(encoding="utf-8")

@@ -3,9 +3,9 @@ from pathlib import Path
 
 import yaml
 
-UNIVERSAL_EVENTS = ("done", "blocked")
+UNIVERSAL_EVENTS = ("done", "blocked", "split")
 ACTIVATE_MODES = ("auto", "approve")
-EVENT_WORDS = {"done", "blocked", "fail", "approved", "rejected"}
+EVENT_WORDS = {"done", "blocked", "split", "fail", "approved", "rejected"}
 PLACEHOLDER_CONTRACT = ("TODO: describe this node type's contract "
                         "(auto-declared placeholder)")
 
